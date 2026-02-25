@@ -1,5 +1,3 @@
-const DATA_DIR = 'tpm';
-const TMP_DIR = 'tmp';
 const DEFAULT_TIMEOUT = 300; // 5 minutes
 const LINE_REPEAT = 100;
 const CSV_EXTENSION = '.csv';
@@ -23,8 +21,6 @@ const OPERATIONS = {
 };
 
 module.exports = {
-    DATA_DIR,
-    TMP_DIR,
     DEFAULT_TIMEOUT,
     LOG_LEVELS,
     LINE_REPEAT,
