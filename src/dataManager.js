@@ -32,27 +32,26 @@ class DataManager {
             throw error;
         }
 
-        console.log('\n🚀 Starting TPM Data Processing...');
+        console.log('\n🚀 Starting Data Processing...');
 
         console.log('='.repeat(LINE_REPEAT));
         console.log(`📋 Operation: ${this.capitalizeFirst(this.config.operation)}`);
         console.log(`📤 Source: ${this.config.source || 'CSV'}`);
         console.log(`📥 Target: ${this.config.target || 'CSV'}`);
-        console.log(`🏢 Source Sales Orgs: ${this.config.salesOrgs.map((org) => org.source).join(', ')}`);
-        console.log(`🏢 Target Sales Orgs: ${this.config.salesOrgs.map((org) => org.target).join(', ')}`);
+        if (this.config.hasSalesOrgs) {
+            console.log(`🏢 Source Sales Orgs: ${this.config.salesOrgs.map((org) => org.source).join(', ') || '(all)'}`);
+            console.log(`🏢 Target Sales Orgs: ${this.config.salesOrgs.map((org) => org.target).join(', ') || '(all)'}`);
+        }
         console.log(`🔍 Verbose: ${this.config.verbose ? 'Enabled' : 'Disabled'}`);
         console.log('='.repeat(LINE_REPEAT));
 
-        if (this.config.salesOrgs.length === 0 || this.config.isList) {
+        if (this.config.hasSalesOrgs && (this.config.salesOrgs.length === 0 || this.config.isList)) {
             console.log('\n🔍 No sales orgs specified, fetching all available sales organizations...');
-
-            // Get all available sales orgs from the source
             await this.getAllSalesOrgs();
         }
 
-        // Auto-convert all CSV to JSON after export operations
         if (this.config.isImport) {
-            await this.jsonConverter.jsonToCsv(); // Convert all data (global + all sales orgs)
+            await this.jsonConverter.jsonToCsv();
         }
     }
 
@@ -72,22 +71,32 @@ class DataManager {
 
         try {
             if (this.config.isList) {
+                if (!this.config.hasSalesOrgs) {
+                    console.log('This project does not use sales organizations.');
+                    return;
+                }
                 await this.listSalesOrgs();
                 return;
             }
 
-            await this.transferSalesOrgData();
+            if (this.config.hasSalesOrgs) {
+                await this.transferSalesOrgData();
+            } else {
+                // No sales orgs — single flat transfer
+                console.log('\n📊 Transferring data...');
+                await this.transferData();
+            }
 
             const totalTime = (Date.now() - startTime) / 1000;
             console.log('\n' + '='.repeat(LINE_REPEAT));
-            console.log(`🎉 TPM Data Processing completed successfully in ${totalTime}s!`);
+            console.log(`🎉 Data Processing completed successfully in ${totalTime}s!`);
             console.log('='.repeat(LINE_REPEAT));
 
             await this.finish();
         } catch (error) {
             const totalTime = (Date.now() - startTime) / 1000;
             console.log('\n' + '='.repeat(LINE_REPEAT));
-            console.error(`💥 TPM Data Processing failed after ${totalTime}s`);
+            console.error(`💥 Data Processing failed after ${totalTime}s`);
             console.error(`❌ Error: ${error.message}`);
             console.log('='.repeat(LINE_REPEAT));
             throw error;
