@@ -1,6 +1,6 @@
 const { ExportJson } = require('./exportJson');
-const { OPERATIONS, LOG_LEVELS, DATA_DIR, TMP_DIR } = require('./constants');
-const { OBJECTS, SALES_ORG_OBJECT } = require('./objects');
+const { OPERATIONS, LOG_LEVELS } = require('./constants');
+const { loadProjectConfig } = require('../src/configLoader');
 const path = require('path');
 const fs = require('fs-extra');
 
@@ -11,6 +11,14 @@ class Config {
         this.operation = operation;
         this.needTemporaryImport = false;
         this.madeTemporaryImport = false;
+
+        // Load project config from YAML
+        const projectRoot = process.cwd();
+        const projectConfig = loadProjectConfig(projectRoot);
+
+        this._objects = projectConfig.objects;
+        this._salesOrgObject = projectConfig.salesOrgObject;
+        this.hasSalesOrgs = !!projectConfig.salesOrgObject;
 
         const sourceOrgs =
             options.sourceOrgs
@@ -61,8 +69,8 @@ class Config {
         this.timeout = options.timeout * 1000;
         this.logLevel = options.verbose ? LOG_LEVELS.TRACE : options.logLevel;
 
-        this.dataDir = path.resolve(process.cwd(), DATA_DIR);
-        this.tmpDir = path.resolve(process.cwd(), TMP_DIR);
+        this.dataDir = path.resolve(projectRoot, projectConfig.dataDir);
+        this.tmpDir = path.resolve(projectRoot, projectConfig.tmpDir);
 
         fs.ensureDir(this.dataDir).then();
 
@@ -97,27 +105,33 @@ class Config {
     }
 
     get allObjects() {
-        return OBJECTS;
+        if (this.hasSalesOrgs) {
+            return [this._salesOrgObject, ...this._objects];
+        }
+        return this._objects;
     }
 
     get salesOrgObjects() {
-        return [SALES_ORG_OBJECT];
+        return this._salesOrgObject ? [this._salesOrgObject] : [];
     }
 
     get slimObjects() {
-        return OBJECTS.filter((objectConfig) => objectConfig.slim);
+        return this._objects.filter((obj) => obj.slim);
     }
 
     get junctionObjects() {
-        return OBJECTS.filter((objectConfig) => objectConfig.junction);
+        return this._objects.filter((obj) => obj.junction);
     }
 
     get hierarchyObjects() {
-        return OBJECTS.filter((objectConfig) => objectConfig.hierarchy);
+        return this._objects.filter((obj) => obj.hierarchy);
     }
 
     getObject(name) {
-        return OBJECTS.find((objectConfig) => objectConfig.objectName === name);
+        if (this._salesOrgObject && this._salesOrgObject.objectName === name) {
+            return this._salesOrgObject;
+        }
+        return this._objects.find((obj) => obj.objectName === name);
     }
 }
 
