@@ -26,7 +26,7 @@ async function main() {
             process.env.TARGET_SALES_ORGS ?? ''
         )
         .option('-v, --verbose', 'Activates verbose logging for the SFDMU tool')
-        .option('--slim', 'Only KPI Sets and Definitions will be imported.')
+        .option('--slim', 'Only import objects marked as slim in the config.')
         .option('-d, --delete', 'Delete old data.')
         .option('--simulation', 'No data will be transferred, but the tool will show the list of objects and fields that will be processed.')
         .option('--all-or-none', 'Setting this property to true will prevent partial updates.')

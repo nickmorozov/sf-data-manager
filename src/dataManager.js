@@ -62,7 +62,7 @@ class DataManager {
         }
 
         if (this.config.isImport) {
-            await this.printOperationErrors(this.config);
+            await this.printOperationErrors();
         }
     }
 
@@ -109,6 +109,12 @@ class DataManager {
     async printOperationErrors() {
         try {
             console.log('\n🔍 Analyzing operation errors...');
+
+            if (!this.config.hasSalesOrgs) {
+                // No sales org partitioning — analyze tmpDir directly
+                await this.csvManager.printCSVErrors(this.config.tmpDir);
+                return;
+            }
 
             // Analyze each relevant sales org directory
             for (const salesOrg of this.config.salesOrgs) {
