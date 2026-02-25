@@ -33,10 +33,7 @@ class ObjectConfig {
     }
 
     get master() {
-        if (this.isMaster !== undefined) {
-            return this.isMaster;
-        }
-        return Boolean(this.where);
+        return this.isMaster !== false || Boolean(this.where);
     }
 
     init() {
