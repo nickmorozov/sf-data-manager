@@ -1,8 +1,8 @@
 const DEFAULT_TIMEOUT = 300; // 5 minutes
 const LINE_REPEAT = 100;
 const CSV_EXTENSION = '.csv';
-const PARENT_IDS_SLUG = 'PARENT_IDS';
-const SALES_ORGS_SLUG = 'SALES_ORGS';
+const PARENT_IDS_SLUG = '${PARENT_IDS}';
+const SALES_ORGS_SLUG = '${SALES_ORGS}';
 
 const LOG_LEVELS = {
     TRACE: 'TRACE',
