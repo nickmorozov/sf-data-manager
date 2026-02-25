@@ -11,7 +11,7 @@ const { OPERATIONS, DEFAULT_TIMEOUT, LOG_LEVELS } = require('./config/constants'
 
 async function main() {
     program
-        .description('Export TPM data from Salesforce org to JSON files')
+        .description('Export/import Salesforce data using SFDMU')
         .argument('[operation]', `Operation (${Object.values(OPERATIONS).join(', ')})`, OPERATIONS.HELP)
         .option('-s, --source <source>', 'Source org alias or username', process.env.SOURCE_ALIAS ?? '')
         .option('-t, --target <target>', 'Target org alias or username', process.env.TARGET_ALIAS ?? '')
@@ -43,7 +43,7 @@ async function main() {
 
                 // Show version info if requested
                 if (options.versionInfo) {
-                    console.log('\n📋 TPM Data Management Tool v1.0.0');
+                    console.log('\n📋 SF Data Manager v1.0.0');
                     const sfdmuVersion = await this.sfdmuManager.getVersion();
                     console.log(`🔧 SFDMU Plugin: ${sfdmuVersion}`);
                     console.log('');
@@ -65,7 +65,7 @@ async function main() {
             }
         })
         .name('data')
-        .description('TPM Data Management Tool')
+        .description('SF Data Manager')
         .version('1.0.0');
 
     await program.parseAsync();
