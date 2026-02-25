@@ -17,7 +17,7 @@ class ExportJson {
 
         let objectConfigs = config.allObjects;
 
-        if (config.isList || !config.targetOrg) {
+        if (config.isList || (config.hasSalesOrgs && !config.targetOrg)) {
             objectConfigs = config.salesOrgObjects;
         } else if (config.slim) {
             objectConfigs = config.slimObjects;
