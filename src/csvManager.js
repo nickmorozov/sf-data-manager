@@ -3,7 +3,6 @@ const path = require('path');
 const { parse } = require('csv-parse');
 
 const { CSV_EXTENSION, LINE_REPEAT } = require('./../config/constants');
-const { SALES_ORG_OBJECT } = require('./../config/objects');
 
 const DML_OPERATIONS = ['insert', 'delete', 'update', 'upsert'];
 const CSV_ISSUES_REPORT = 'CSVIssuesReport' + CSV_EXTENSION;
@@ -14,8 +13,8 @@ class CsvManager {
         this.config = config;
     }
 
-    async parseSalesOrgs() {
-        const salesOrgsCsvPath = path.join(this.config.tmpDir, SALES_ORG_OBJECT.objectName + CSV_EXTENSION);
+    async parseSalesOrgs(salesOrgObject) {
+        const salesOrgsCsvPath = path.join(this.config.tmpDir, salesOrgObject.objectName + CSV_EXTENSION);
 
         if (!(await fs.pathExists(salesOrgsCsvPath))) {
             throw new Error('Sales organizations file not found');
@@ -27,7 +26,7 @@ class CsvManager {
             fs.createReadStream(salesOrgsCsvPath)
                 .pipe(parse({ columns: true, bom: true }))
                 .on('data', (row) => {
-                    const value = row[SALES_ORG_OBJECT.externalId];
+                    const value = row[salesOrgObject.externalId];
                     if (value && value.trim()) {
                         allSalesOrgs.push(value.trim());
                     }

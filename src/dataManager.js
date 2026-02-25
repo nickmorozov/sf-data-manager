@@ -125,7 +125,7 @@ class DataManager {
             // Get all sales orgs data
             await this.transferData();
 
-            const allSalesOrgs = await this.csvManager.parseSalesOrgs();
+            const allSalesOrgs = await this.csvManager.parseSalesOrgs(this.config._salesOrgObject);
 
             if (allSalesOrgs.length === 0) {
                 console.warn('⚠️ No sales organizations found in source org');
