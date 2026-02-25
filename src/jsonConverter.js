@@ -19,35 +19,24 @@ class JsonConverter {
     }
 
     async csvToJson() {
-        console.log('🏢 Converting Sales Org CSV files to JSON...');
+        console.log('📁 Converting CSV files to JSON...');
 
-        for (const salesOrg of this.config.salesOrgs) {
-            await this.convertSalesOrgCsvToJson(salesOrg.source);
+        if (this.config.hasSalesOrgs) {
+            for (const salesOrg of this.config.salesOrgs) {
+                await this.convertCsvDirToJson(path.join(this.config.tmpDir, salesOrg.source), path.join(this.config.dataDir, salesOrg.source));
+            }
+        } else {
+            await this.convertCsvDirToJson(this.config.tmpDir, this.config.dataDir);
         }
 
         console.log('✅ CSV to JSON conversion completed');
     }
 
-    async convertSalesOrgCsvToJson(sourceOrg) {
-        if (this.config.verbose) {
-            console.log(`📁 Converting Sales Org ${sourceOrg} CSV files to JSON...`);
-        }
-
-        const inputDir = path.join(this.config.tmpDir, sourceOrg);
-        const outputDir = path.join(this.config.dataDir, sourceOrg);
-
+    async convertCsvDirToJson(inputDir, baseOutputDir) {
         if (!(await fs.pathExists(inputDir))) {
-            console.log(`⚠️  Sales Org directory ${sourceOrg} not found, skipping...`);
+            console.log(`⚠️  CSV directory ${inputDir} not found, skipping...`);
             return;
         }
-
-        // Remove existing directory if it exists to refresh JSON files
-        if (await fs.pathExists(outputDir)) {
-            await fs.remove(outputDir);
-        }
-
-        // Create JSON directory for the sales org
-        await fs.ensureDir(outputDir);
 
         const csvFiles = await fs.readdir(inputDir);
 
@@ -63,21 +52,21 @@ class JsonConverter {
                     continue;
                 }
 
-                await this.convertCsvFileToJson(csvPath, objectConfig, sourceOrg);
+                await this.convertCsvFileToJson(csvPath, objectConfig, baseOutputDir);
             }
         }
     }
 
-    async convertCsvFileToJson(csvPath, objectConfig, salesOrg) {
+    async convertCsvFileToJson(csvPath, objectConfig, baseOutputDir) {
         if (this.config.verbose) {
-            console.log(`  📄 Converting ${objectConfig.objectName}${salesOrg ? ` (${salesOrg})` : ''}...`);
+            console.log(`  📄 Converting ${objectConfig.objectName}...`);
         }
 
         if (!objectConfig) {
             return null;
         }
 
-        const outputDir = path.join(this.config.dataDir, salesOrg, objectConfig.objectName);
+        const outputDir = path.join(baseOutputDir, objectConfig.objectName);
 
         await fs.ensureDir(outputDir);
 
@@ -123,23 +112,24 @@ class JsonConverter {
     async jsonToCsv() {
         console.log('🔄 Converting JSON files to CSV...');
 
-        for (const salesOrg of this.config.salesOrgs) {
-            await this.convertSalesOrgJsonToCsv(salesOrg);
+        if (this.config.hasSalesOrgs) {
+            for (const salesOrg of this.config.salesOrgs) {
+                await this.convertJsonDirToCsv(
+                    path.join(this.config.dataDir, salesOrg.source),
+                    path.join(this.config.tmpDir, salesOrg.target),
+                    salesOrg
+                );
+            }
+        } else {
+            await this.convertJsonDirToCsv(this.config.dataDir, this.config.tmpDir);
         }
 
         console.log('✅ JSON to CSV conversion completed');
     }
 
-    async convertSalesOrgJsonToCsv(salesOrg) {
-        if (this.config.verbose) {
-            console.log(`📁 Converting Sales Org ${salesOrg.source} JSON files to CSV (target: ${salesOrg.target})...`);
-        }
-
-        const inputDir = path.join(this.config.dataDir, salesOrg.source);
-        const outputDir = path.join(this.config.tmpDir, salesOrg.target);
-
+    async convertJsonDirToCsv(inputDir, outputDir, salesOrg) {
         if (!(await fs.pathExists(inputDir))) {
-            console.log(`⚠️  Sales Org JSON directory ${salesOrg.source} not found, skipping...`);
+            console.log(`⚠️  JSON directory ${inputDir} not found, skipping...`);
             return;
         }
 
@@ -160,7 +150,7 @@ class JsonConverter {
 
     async convertJsonDirectoryToCsv(jsonDir, csvPath, objectName, salesOrg) {
         if (this.config.verbose) {
-            console.log(`  📄 Converting ${objectName} (${salesOrg.source} → ${salesOrg.target})...`);
+            console.log(`  📄 Converting ${objectName}...`);
         }
 
         const jsonFiles = await fs.readdir(jsonDir);
@@ -184,7 +174,9 @@ class JsonConverter {
                 }
 
                 // Transform record if target sales org is specified
-                this.transformRecordForTargetSalesOrg(record, salesOrg);
+                if (salesOrg) {
+                    this.transformRecordForTargetSalesOrg(record, salesOrg);
+                }
 
                 records.push(record);
             }

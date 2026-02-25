@@ -234,13 +234,13 @@ class DataManager {
             const totalTime = (Date.now() - startTime) / 1000;
             console.log(`✅ ${this.capitalizeFirst(this.config.operation)} completed successfully in ${totalTime}s!`);
 
-            // Export KPI Set definitions after main export is complete
-            if (this.config.isExport && this.config.targetOrg) {
+            // Export junction records after main export is complete
+            if (this.config.isExport && this.config.junctionObjects.length > 0) {
                 await this.exportExtraJunctions(targetDir);
             }
 
             // Update self-referencing lookups if needed
-            if (this.config.isImport && this.config.targetOrg && !this.config.simulation) {
+            if (this.config.isImport && this.config.hierarchyObjects.length > 0 && !this.config.simulation) {
                 await this.updateSelfLookups(targetDir);
             }
         } catch (error) {
