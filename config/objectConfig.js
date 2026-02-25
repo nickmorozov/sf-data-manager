@@ -1,5 +1,4 @@
 const { SALES_ORGS_SLUG } = require('./constants');
-const { SALES_ORG_OBJECT } = require('./objects');
 
 class ObjectConfig {
     constructor(config, objectConfig) {
@@ -13,8 +12,9 @@ class ObjectConfig {
         if (this.where) {
             const salesOrgsString = this.config.salesOrgs?.map((salesOrgs) => `'${this.config.isExport ? salesOrgs.source : salesOrgs.target}'`).join(', ');
 
+            const isSalesOrgObject = this.config._salesOrgObject && this.objectName === this.config._salesOrgObject.objectName;
             // For sales org object, if no sales orgs specified, don't add WHERE clause to get all
-            if ((this.objectName === SALES_ORG_OBJECT.objectName && !salesOrgsString) || this.config.isList) {
+            if ((isSalesOrgObject && !salesOrgsString) || this.config.isList) {
                 // Skip WHERE clause to get all sales organizations
             } else if (this.where.includes(SALES_ORGS_SLUG)) {
                 // Only add WHERE clause if we have sales orgs for SALES_ORGS dependent queries
@@ -33,6 +33,9 @@ class ObjectConfig {
     }
 
     get master() {
+        if (this.isMaster !== undefined) {
+            return this.isMaster;
+        }
         return Boolean(this.where);
     }
 
