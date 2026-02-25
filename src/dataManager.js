@@ -137,7 +137,8 @@ class DataManager {
 
     async getAllSalesOrgs() {
         try {
-            const allSalesOrgs = await this.sfManager.querySalesOrgs(this.config.source, this.config._salesOrgObject);
+            const queryOrg = this.config.isImport ? this.config.target : this.config.source;
+            const allSalesOrgs = await this.sfManager.querySalesOrgs(queryOrg, this.config._salesOrgObject);
 
             if (allSalesOrgs.length === 0) {
                 console.warn('⚠️ No sales organizations found in source org');
