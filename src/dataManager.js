@@ -10,6 +10,20 @@ const { LINE_REPEAT, PARENT_IDS_SLUG, CSV_EXTENSION } = require('./../config/con
 
 const EXPORT_JSON = 'export.json';
 
+/**
+ * Navigate a nested SOQL result object by dot-separated field path.
+ * e.g., getNestedValue(record, 'cgcloud__KPI_Set__r.Name') → record.cgcloud__KPI_Set__r.Name
+ */
+function getNestedValue(record, fieldPath) {
+    const parts = fieldPath.split('.');
+    let current = record;
+    for (const part of parts) {
+        if (current == null) return null;
+        current = current[part];
+    }
+    return current;
+}
+
 class DataManager {
     constructor(config) {
         this.config = config;
@@ -215,6 +229,12 @@ class DataManager {
             }
 
             await fs.ensureDir(targetDir);
+
+            // Pre-export: resolve unions by querying org for parent IDs, expanding WHERE clauses
+            if (this.config.isExport) {
+                await this.resolveUnions();
+            }
+
             const exportPath = path.join(targetDir, EXPORT_JSON);
 
             // Write temporary config file
@@ -234,12 +254,9 @@ class DataManager {
             const totalTime = (Date.now() - startTime) / 1000;
             console.log(`✅ ${this.capitalizeFirst(this.config.operation)} completed successfully in ${totalTime}s!`);
 
-            // Post-export phases: unions → junctions
-            if (this.config.isExport) {
-                await this.exportUnions(targetDir);
-                if (this.config.junctionObjects.length > 0) {
-                    await this.exportExtraJunctions(targetDir);
-                }
+            // Post-export: junction secondary pass
+            if (this.config.isExport && this.config.junctionObjects.length > 0) {
+                await this.exportExtraJunctions(targetDir);
             }
 
             // Update self-referencing lookups if needed
@@ -254,97 +271,98 @@ class DataManager {
     }
 
     /**
-     * Export additional records for objects with union configs.
-     * Reads lookup values from other objects' CSVs, builds flat WHERE clauses,
-     * runs a targeted SFDMU pass, and merges results into existing CSVs.
+     * Pre-export: query the org for union parent field values and expand WHERE clauses.
+     * This runs BEFORE the main SFDMU pass so that referenced records (e.g. KPI_Sets
+     * used by Account_Template or RTR_Report_Configuration) are included in the export
+     * from the start. SFDMU then resolves all relationship lookups naturally.
      */
-    async exportUnions(targetDir) {
+    async resolveUnions() {
         if (this.config.unionObjects.length === 0) return;
 
-        console.log(`\n🔗 Processing union exports...`);
-
-        const objects = [];
-        const objectBackupNames = new Set();
+        console.log(`\n🔗 Resolving union dependencies...`);
+        const sourceOrg = this.config.source;
 
         for (const objectConfig of this.config.unionObjects) {
             const unions = Array.isArray(objectConfig.union) ? objectConfig.union : [objectConfig.union];
-
-            // Collect all parent IDs from all union sources for this object
             const allParentIds = new Set();
 
             for (const unionConfig of unions) {
-                const parentIds = await this.csvManager.getParentExternalIdsFromSalesOrg(targetDir, unionConfig.parent);
-                parentIds.forEach((id) => allParentIds.add(id));
+                // Find the parent object's export config to extract its resolved WHERE clause
+                const parentExportObj = this.config.exportJson.objects.find(
+                    (obj) => obj.objectName === unionConfig.parent.objectName
+                );
+
+                if (!parentExportObj) {
+                    console.warn(`  ⚠️ Export config for ${unionConfig.parent.objectName} not found, skipping`);
+                    continue;
+                }
+
+                // Build a SOQL query for the parent's lookup field, reusing its WHERE clause
+                const field = unionConfig.parent.field;
+                const whereMatch = parentExportObj.query.match(/ WHERE (.+?)(?= ORDER BY )/i);
+
+                let query = `SELECT ${field} FROM ${unionConfig.parent.objectName}`;
+                if (whereMatch) query += ` WHERE ${whereMatch[1]}`;
+
+                console.log(`  🔍 Querying ${unionConfig.parent.objectName} for ${field}...`);
+
+                const records = await this.sfManager.query(sourceOrg, query);
+
+                for (const record of records) {
+                    const value = getNestedValue(record, field);
+                    if (value) allParentIds.add(value);
+                }
+            }
+
+            // Also resolve the object's own WHERE clause to flat IDs
+            // (SOQL forbids combining semi-join subselects with OR)
+            const exportObject = this.config.exportJson.objects.find((obj) => obj.objectName === objectConfig.objectName);
+
+            if (exportObject) {
+                const origWhereMatch = exportObject.query.match(/ WHERE (.+?)(?= ORDER BY )/i);
+                if (origWhereMatch) {
+                    const externalId = objectConfig.externalId;
+                    const origQuery = `SELECT ${externalId} FROM ${objectConfig.objectName} WHERE ${origWhereMatch[1]}`;
+                    console.log(`  🔍 Resolving original ${objectConfig.objectName} WHERE to flat IDs...`);
+                    const origRecords = await this.sfManager.query(sourceOrg, origQuery);
+                    for (const record of origRecords) {
+                        const value = record[externalId];
+                        if (value) allParentIds.add(value);
+                    }
+                }
             }
 
             if (allParentIds.size === 0) {
-                console.log(`  ⚠️ No union parent IDs found for ${objectConfig.objectName}, skipping`);
+                console.log(`  ⚠️ No union parent IDs for ${objectConfig.objectName}, skipping`);
                 continue;
             }
 
-            console.log(`  📊 Found ${allParentIds.size} union IDs for ${objectConfig.objectName}: ${Array.from(allParentIds).join(', ')}`);
+            console.log(`  📊 Found ${allParentIds.size} combined IDs for ${objectConfig.objectName}: ${Array.from(allParentIds).join(', ')}`);
 
-            // Build WHERE clause with literal values — no semi-joins
+            // Build a single flat WHERE with ALL IDs (original + union) — no semi-joins
             const idsString = Array.from(allParentIds)
                 .map((id) => `'${id.replace(/'/g, "\\'")}'`)
                 .join(', ');
-            // Use the first union's WHERE template (replace ${PARENT_IDS})
-            const whereTemplate = unions[0].where;
-            const where = whereTemplate.replace(PARENT_IDS_SLUG, idsString);
+            const flatWhere = unions[0].where.replace(PARENT_IDS_SLUG, idsString);
 
-            // Find this object's export config and rebuild query with union WHERE
-            const exportObject = this.config.exportJson.objects.find((obj) => obj.objectName === objectConfig.objectName);
-            if (!exportObject) {
-                console.warn(`  ⚠️ Could not find export config for ${objectConfig.objectName}, skipping`);
-                continue;
+            // Replace the entire WHERE clause with the flat one
+            if (exportObject) {
+                const whereMatch = exportObject.query.match(/^(.+? WHERE )(.+)( ORDER BY .+)$/i);
+
+                if (whereMatch) {
+                    exportObject.query = `${whereMatch[1]}${flatWhere}${whereMatch[3]}`;
+                } else {
+                    const orderByMatch = exportObject.query.match(/^(.+?)( ORDER BY .+)$/i);
+                    if (orderByMatch) {
+                        exportObject.query = `${orderByMatch[1]} WHERE ${flatWhere}${orderByMatch[2]}`;
+                    }
+                }
+
+                console.log(`  ✅ Replaced ${objectConfig.objectName} WHERE with flat IDs`);
+                if (this.config.verbose) {
+                    console.log(`  📝 Query: ${exportObject.query}`);
+                }
             }
-
-            const [selectFrom] = exportObject.query.split(/ WHERE /i);
-            const orderBy = exportObject.query.split(/ ORDER BY /i).pop();
-
-            objects.push({
-                ...exportObject,
-                query: `${selectFrom} WHERE ${where} ORDER BY ${orderBy}`,
-                master: true,
-            });
-
-            objectBackupNames.add(objectConfig.objectName);
-        }
-
-        if (objects.length === 0) {
-            console.log(`  ⚠️ No union objects to export, skipping`);
-            return;
-        }
-
-        // Back up existing CSVs before union export overwrites them
-        const backups = {};
-        for (const objectName of objectBackupNames) {
-            const csvPath = path.join(targetDir, objectName + CSV_EXTENSION);
-            backups[objectName] = await this.csvManager.readCsvRecords(csvPath);
-            if (this.config.verbose && backups[objectName].length > 0) {
-                console.log(`  📦 Backed up ${backups[objectName].length} ${objectName} records`);
-            }
-        }
-
-        // Run targeted SFDMU pass for union objects
-        try {
-            const unionExportJson = { ...this.config.exportJson, objects };
-
-            if (this.config.verbose) {
-                console.log(`  Union export configuration:`, JSON.stringify(unionExportJson, null, 2));
-            }
-
-            const exportPath = path.join(targetDir, EXPORT_JSON);
-            await fs.writeJson(exportPath, unionExportJson, { spaces: 4 });
-            await this.sfdmuManager.run(targetDir);
-
-            // Merge: existing/main records take priority
-            await this.mergeExportCsvs(targetDir, backups);
-
-            console.log(`✅ Union export completed successfully!`);
-        } catch (error) {
-            console.error(`  ❌ Failed to export union records: ${error.message}`);
-            throw error;
         }
     }
 
