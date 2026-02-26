@@ -93,13 +93,36 @@ class JsonConverter {
                 .on('end', async () => {
                     try {
                         // Convert each record to JSON file
+                        let converted = 0;
+                        let skipped = 0;
                         for (const record of records) {
                             const externalId = this.getExternalIdValue(record, objectConfig);
                             if (externalId) {
                                 const fileName = this.sanitizeFileName(externalId);
                                 const jsonPath = path.join(outputDir, `${fileName}${JSON_EXTENSION}`);
                                 await fs.writeJson(jsonPath, record, { spaces: 2 });
+                                converted++;
+                            } else {
+                                skipped++;
+                                // Show identifiable fields so user can investigate
+                                const hints = Object.entries(record)
+                                    .filter(([k, v]) => {
+                                        const isDescription = k.includes('Description');
+                                        const isExternalId = k.includes('External_Id');
+                                        const isName = k === 'Name';
+
+                                        return v && (isName || isDescription || isExternalId);
+                                    })
+                                    .map(([k, v]) => `${k}=${v}`)
+                                    .slice(0, 3);
+                                console.warn(
+                                    `    ⚠️  ${objectConfig.objectName}: skipped record — empty external ID (${objectConfig.externalId})${hints.length ? ' | ' + hints.join(', ') : ''}`
+                                );
                             }
+                        }
+
+                        if (skipped > 0) {
+                            console.warn(`    ⚠️  ${objectConfig.objectName}: ${skipped}/${records.length} records skipped (empty external ID: ${objectConfig.externalId})`);
                         }
 
                         if (records.length === 0) {
@@ -108,7 +131,7 @@ class JsonConverter {
                         }
 
                         if (this.config.verbose) {
-                            console.log(`    ✅ Converted ${records.length} records for ${objectConfig.objectName}`);
+                            console.log(`    ✅ Converted ${converted} records for ${objectConfig.objectName}`);
                         }
 
                         resolve();
@@ -254,6 +277,13 @@ class JsonConverter {
             const values = fields.map((f) => record[f]);
             if (values.every(Boolean)) {
                 return values.join('_');
+            }
+            // Fallback: use non-empty fields when some are missing
+            const nonEmpty = values.filter(Boolean);
+            if (nonEmpty.length > 0) {
+                const missing = fields.filter((f) => !record[f]);
+                console.warn(`    ⚠️  ${objectConfig.objectName}: partial compound ID — empty: ${missing.join(', ')}; using: ${nonEmpty.join('_')}`);
+                return nonEmpty.join('_');
             }
             return null;
         } else {
