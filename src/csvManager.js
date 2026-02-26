@@ -13,29 +13,6 @@ class CsvManager {
         this.config = config;
     }
 
-    async parseSalesOrgs(salesOrgObject) {
-        const salesOrgsCsvPath = path.join(this.config.tmpDir, salesOrgObject.objectName + CSV_EXTENSION);
-
-        if (!(await fs.pathExists(salesOrgsCsvPath))) {
-            throw new Error('Sales organizations file not found');
-        }
-
-        return new Promise((resolve, reject) => {
-            const allSalesOrgs = [];
-
-            fs.createReadStream(salesOrgsCsvPath)
-                .pipe(parse({ columns: true, bom: true }))
-                .on('data', (row) => {
-                    const value = row[salesOrgObject.externalId];
-                    if (value && value.trim()) {
-                        allSalesOrgs.push(value.trim());
-                    }
-                })
-                .on('end', () => resolve(allSalesOrgs))
-                .on('error', reject);
-        });
-    }
-
     async getChildParentMapping(targetDir, objectConfig) {
         const csvPath = path.join(targetDir, objectConfig.objectName + CSV_EXTENSION);
         if (!(await fs.pathExists(csvPath))) {
@@ -61,7 +38,7 @@ class CsvManager {
                 .on('end', () =>
                     resolve({
                         childParentMap: Object.fromEntries(childParentMap),
-                        allExternalIds: Array.from(allExternalIds)
+                        allExternalIds: Array.from(allExternalIds),
                     })
                 )
                 .on('error', reject);
@@ -85,7 +62,7 @@ class CsvManager {
             fs.createReadStream(objectCsv)
                 .pipe(parse({ columns: true, bom: true }))
                 .on('data', (row) => {
-                    const externalId = row[parentConfig.externalId];
+                    const externalId = row[parentConfig.field || parentConfig.externalId];
                     if (externalId) {
                         externalIds.add(externalId);
                     }
@@ -164,7 +141,7 @@ class CsvManager {
                     if (errorText) {
                         errors.push({
                             recordName,
-                            error: errorText.toString().trim()
+                            error: errorText.toString().trim(),
                         });
                     }
                 })
@@ -174,7 +151,7 @@ class CsvManager {
                         operation,
                         totalRecords,
                         errors,
-                        filename
+                        filename,
                     });
                 })
                 .on('error', reject);
@@ -205,7 +182,7 @@ class CsvManager {
                         parentFieldName: row['Parent field name'],
                         parentFieldValue: row['Parent field value'],
                         parentSObjectName: row['Parent SObject name'],
-                        sObjectName: row['sObject name']
+                        sObjectName: row['sObject name'],
                     };
 
                     if (issue.error || issue.sObjectName) {
@@ -241,7 +218,7 @@ class CsvManager {
                         parentExternalIdFieldName: row['Parent ExternalId field name'],
                         parentSObjectName: row['Parent SObject name'],
                         recordId: row['Record Id'],
-                        sObjectName: row['sObject name']
+                        sObjectName: row['sObject name'],
                     };
 
                     if (missing.missingParentExternalId || missing.recordId) {
@@ -386,5 +363,5 @@ class CsvManager {
 }
 
 module.exports = {
-    CsvManager
+    CsvManager,
 };

@@ -11,6 +11,7 @@ This repo is designed to be used as a **git submodule** in consumer projects. It
 ## Running
 
 From the consumer project root:
+
 ```bash
 node sf-data-manager/main.js export -s <source-org> --source-orgs 0001,0002 --verbose
 node sf-data-manager/main.js import -t <target-org> --source-orgs 0001
@@ -30,6 +31,7 @@ No build step, no test suite, no linter configured. Pure CommonJS Node.js.
 ## Architecture
 
 ### Data Flow
+
 ```
 Export: Salesforce Org → SFDMU → CSV (tmp/) → JSON (data/)
 Import: JSON (data/) → CSV (tmp/) → SFDMU → Salesforce Org
@@ -43,6 +45,7 @@ The JSON layer exists so exported data can be version-controlled (one file per r
 Commander.js entry point. Parses args, creates `Config`, creates `DataManager`, runs `init()` then `processData()`.
 
 **Config Layer** — `config/`
+
 - `config.js` — `Config` class. Loads YAML via `configLoader`, validates options, resolves paths, creates `ExportJson`. Getters expose filtered object lists: `allObjects`, `slimObjects`, `junctionObjects`, `hierarchyObjects`.
 - `configLoader.js` — Finds first `.yaml`/`.yml` in consumer's `config/` dir and parses it.
 - `exportJson.js` — Builds the SFDMU `export.json` structure from object definitions.
@@ -50,11 +53,13 @@ Commander.js entry point. Parses args, creates `Config`, creates `DataManager`, 
 - `constants.js` — Shared constants: `OPERATIONS`, `LOG_LEVELS`, `DEFAULT_TIMEOUT` (300s), placeholder slugs.
 
 **Core Logic** — `src/`
+
 - `dataManager.js` — Orchestrator. Routes to single or multi-sales-org transfer. Handles junction exports, self-lookup Apex updates, two-step temporary-value imports, and post-operation error analysis.
 - `csvManager.js` — CSV parsing (with BOM support via `csv-parse`). Extracts sales orgs, parent IDs, hierarchy mappings. Analyzes SFDMU error reports (`CSVIssuesReport.csv`, `MissingParentRecordsReport.csv`).
 - `jsonConverter.js` — Bidirectional CSV↔JSON. Each record becomes a separate JSON file named by external ID. Handles compound IDs (semicolon-separated), sales org field remapping, filename sanitization, and manual CSV quoting.
 
 **External Wrappers** — `lib/`
+
 - `sfdmu.js` — Spawns `sf sfdmu run` as subprocess with timeout, real-time stdout streaming in verbose mode.
 - `sf.js` — Salesforce CLI queries and Apex execution. Generates Apex from `templates/updateSelfLookups.apex` for self-referencing hierarchies.
 
@@ -71,6 +76,7 @@ Commander.js entry point. Parses args, creates `Config`, creates `DataManager`, 
 ### YAML Config Schema
 
 Consumer projects provide `config/<name>.yaml`:
+
 - `name` — Project name
 - `dataDir` — JSON storage directory (default: `data`)
 - `tmpDir` — CSV working directory (default: `tmp`)

@@ -33,21 +33,22 @@ class ObjectConfig {
     }
 
     get master() {
-        return this.isMaster !== false || Boolean(this.where);
+        return Boolean(this.where);
     }
 
     init() {
         return {
+            objectName: this.objectName,
             query: this.query,
             externalId: this.externalId,
             operation: this.operation || 'Upsert',
             master: this.master,
             excludedFields: this.excludedFields,
-            deleteOldData: this.config.deleteOldData || this.deleteOldData || false
+            deleteOldData: this.config.deleteOldData || this.deleteOldData || false,
         };
     }
 }
 
 module.exports = {
-    ObjectConfig
+    ObjectConfig,
 };

@@ -2,8 +2,10 @@ const { ObjectConfig } = require('./objectConfig');
 
 class ExportJson {
     constructor(config) {
+        this.excludeIdsFromCSVFiles = true;
         this.promptOnIssuesInCSVFiles = false;
         this.promptOnMissingParentObjects = false;
+        this.csvInsertNulls = false;
 
         if (config.simulation) {
             this.simulationMode = true;
@@ -28,5 +30,5 @@ class ExportJson {
 }
 
 module.exports = {
-    ExportJson
+    ExportJson,
 };

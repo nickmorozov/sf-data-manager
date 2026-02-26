@@ -149,7 +149,7 @@ class DataManager {
 
             this.config.salesOrgs = allSalesOrgs.map((org) => ({
                 source: org,
-                target: org // Use the same org for target if not specified
+                target: org, // Use the same org for target if not specified
             }));
         } catch (error) {
             console.error(`Error getting sales orgs: ${error.message}`);
@@ -234,9 +234,12 @@ class DataManager {
             const totalTime = (Date.now() - startTime) / 1000;
             console.log(`✅ ${this.capitalizeFirst(this.config.operation)} completed successfully in ${totalTime}s!`);
 
-            // Export junction records after main export is complete
-            if (this.config.isExport && this.config.junctionObjects.length > 0) {
-                await this.exportExtraJunctions(targetDir);
+            // Post-export phases: unions → junctions
+            if (this.config.isExport) {
+                await this.exportUnions(targetDir);
+                if (this.config.junctionObjects.length > 0) {
+                    await this.exportExtraJunctions(targetDir);
+                }
             }
 
             // Update self-referencing lookups if needed
@@ -246,6 +249,101 @@ class DataManager {
         } catch (error) {
             const totalTime = (Date.now() - startTime) / 1000;
             console.error(`❌ transferData failed after ${totalTime}s: ${error.message}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Export additional records for objects with union configs.
+     * Reads lookup values from other objects' CSVs, builds flat WHERE clauses,
+     * runs a targeted SFDMU pass, and merges results into existing CSVs.
+     */
+    async exportUnions(targetDir) {
+        if (this.config.unionObjects.length === 0) return;
+
+        console.log(`\n🔗 Processing union exports...`);
+
+        const objects = [];
+        const objectBackupNames = new Set();
+
+        for (const objectConfig of this.config.unionObjects) {
+            const unions = Array.isArray(objectConfig.union) ? objectConfig.union : [objectConfig.union];
+
+            // Collect all parent IDs from all union sources for this object
+            const allParentIds = new Set();
+
+            for (const unionConfig of unions) {
+                const parentIds = await this.csvManager.getParentExternalIdsFromSalesOrg(targetDir, unionConfig.parent);
+                parentIds.forEach((id) => allParentIds.add(id));
+            }
+
+            if (allParentIds.size === 0) {
+                console.log(`  ⚠️ No union parent IDs found for ${objectConfig.objectName}, skipping`);
+                continue;
+            }
+
+            console.log(`  📊 Found ${allParentIds.size} union IDs for ${objectConfig.objectName}: ${Array.from(allParentIds).join(', ')}`);
+
+            // Build WHERE clause with literal values — no semi-joins
+            const idsString = Array.from(allParentIds)
+                .map((id) => `'${id.replace(/'/g, "\\'")}'`)
+                .join(', ');
+            // Use the first union's WHERE template (replace ${PARENT_IDS})
+            const whereTemplate = unions[0].where;
+            const where = whereTemplate.replace(PARENT_IDS_SLUG, idsString);
+
+            // Find this object's export config and rebuild query with union WHERE
+            const exportObject = this.config.exportJson.objects.find((obj) => obj.objectName === objectConfig.objectName);
+            if (!exportObject) {
+                console.warn(`  ⚠️ Could not find export config for ${objectConfig.objectName}, skipping`);
+                continue;
+            }
+
+            const [selectFrom] = exportObject.query.split(/ WHERE /i);
+            const orderBy = exportObject.query.split(/ ORDER BY /i).pop();
+
+            objects.push({
+                ...exportObject,
+                query: `${selectFrom} WHERE ${where} ORDER BY ${orderBy}`,
+                master: true,
+            });
+
+            objectBackupNames.add(objectConfig.objectName);
+        }
+
+        if (objects.length === 0) {
+            console.log(`  ⚠️ No union objects to export, skipping`);
+            return;
+        }
+
+        // Back up existing CSVs before union export overwrites them
+        const backups = {};
+        for (const objectName of objectBackupNames) {
+            const csvPath = path.join(targetDir, objectName + CSV_EXTENSION);
+            backups[objectName] = await this.csvManager.readCsvRecords(csvPath);
+            if (this.config.verbose && backups[objectName].length > 0) {
+                console.log(`  📦 Backed up ${backups[objectName].length} ${objectName} records`);
+            }
+        }
+
+        // Run targeted SFDMU pass for union objects
+        try {
+            const unionExportJson = { ...this.config.exportJson, objects };
+
+            if (this.config.verbose) {
+                console.log(`  Union export configuration:`, JSON.stringify(unionExportJson, null, 2));
+            }
+
+            const exportPath = path.join(targetDir, EXPORT_JSON);
+            await fs.writeJson(exportPath, unionExportJson, { spaces: 4 });
+            await this.sfdmuManager.run(targetDir);
+
+            // Merge: existing/main records take priority
+            await this.mergeExportCsvs(targetDir, backups);
+
+            console.log(`✅ Union export completed successfully!`);
+        } catch (error) {
+            console.error(`  ❌ Failed to export union records: ${error.message}`);
             throw error;
         }
     }
@@ -261,35 +359,52 @@ class DataManager {
         const sharedObjectNames = new Set();
 
         for (const junctionConfig of this.config.junctionObjects) {
-            const junction = junctionConfig.junction;
+            const junctions = Array.isArray(junctionConfig.junction) ? junctionConfig.junction : [junctionConfig.junction];
 
             try {
-                // Get KPI Set names from the exported CSV
-                const externalIds = await this.csvManager.getParentExternalIdsFromSalesOrg(targetDir, junction.parent);
+                // Collect parent IDs from all junction sources (OR-combined)
+                const allExternalIds = new Set();
+                for (const junction of junctions) {
+                    const ids = await this.csvManager.getParentExternalIdsFromSalesOrg(targetDir, junction.parent);
+                    ids.forEach((id) => allExternalIds.add(id));
+                }
+                const externalIds = Array.from(allExternalIds);
 
                 if (externalIds.length === 0) {
-                    console.log(`  ⚠️ No ${junction.parent.objectName} records found, skipping junction export`);
-                    return;
+                    console.log(`  ⚠️ No parent records found for ${junctionConfig.objectName}, skipping junction export`);
+                    continue;
                 }
 
-                console.log(`  📊 Found ${externalIds.length} ${junction.parent.objectName} records: ${externalIds.join(', ')}`);
+                console.log(`  📊 Found ${externalIds.length} parent records for ${junctionConfig.objectName}: ${externalIds.join(', ')}`);
 
-                // Create a WHERE clause for the KPI Set names
-                const where = junction.where.replace(PARENT_IDS_SLUG, `'${externalIds.join("', '")}'`);
+                // Create a WHERE clause for the parent IDs
+                const where = junctions[0].where.replace(PARENT_IDS_SLUG, externalIds.map((id) => `'${id.replace(/'/g, "\\'")}'`).join(', '));
 
-                // Create custom export configuration for KPI Set definitions
-                let junctionObject = this.config.exportJson.objects.find((objectConfig) => objectConfig.query.includes(junctionConfig.objectName));
+                // Create custom export configuration for junction records
+                let junctionObject = this.config.exportJson.objects.find((objectConfig) => objectConfig.objectName === junctionConfig.objectName);
+                // Build junction query: replace any existing WHERE with the junction WHERE
+                const [selectFrom] = junctionObject.query.split(/ WHERE /i);
+                const orderBy = junctionObject.query.split(/ ORDER BY /i).pop();
                 objects.push({
                     ...junctionObject,
-                    query: junctionObject.query.replace('ORDER BY', `WHERE ${where} ORDER BY`),
-                    master: true
+                    query: `${selectFrom} WHERE ${where} ORDER BY ${orderBy}`,
+                    master: true,
                 });
 
-                for (const parentName of junction.objects) {
-                    const parentObjectConfig = this.config.exportJson.objects.find((objectConfig) => objectConfig.query.includes(parentName));
+                // Collect shared objects from ALL junction configs
+                const sharedObjects = new Set();
+                for (const junction of junctions) {
+                    if (junction.objects) {
+                        junction.objects.forEach((name) => sharedObjects.add(name));
+                    }
+                }
+
+                for (const parentName of sharedObjects) {
+                    const parentObjectConfig = this.config.exportJson.objects.find((objectConfig) => objectConfig.objectName === parentName);
 
                     if (!parentObjectConfig) {
-                        console.warn(`⚠️ Could not find configuration for ${parentName}, skipping junction export`);
+                        console.warn(`⚠️ Could not find configuration for ${parentName}, skipping`);
+                        continue;
                     }
 
                     if (!objects.some((objectConfig) => objectConfig.objectName === parentName)) {
@@ -303,6 +418,11 @@ class DataManager {
                 console.error(`❌ Failed to export ${junctionConfig.objectName}: ${error.message}`);
                 throw error;
             }
+        }
+
+        if (objects.length === 0) {
+            console.log(`  ⚠️ No junction objects to export, skipping`);
+            return;
         }
 
         // Back up CSV records for shared objects before junction export overwrites them
@@ -342,7 +462,7 @@ class DataManager {
 
     /**
      * Merge backed-up CSV records from the main export with junction export results.
-     * Junction records take priority for duplicate external IDs.
+     * Main records take priority for duplicate external IDs (they have complete lookup context).
      */
     async mergeExportCsvs(targetDir, backups) {
         for (const [objectName, mainRecords] of Object.entries(backups)) {
@@ -354,15 +474,15 @@ class DataManager {
             const csvPath = path.join(targetDir, objectName + CSV_EXTENSION);
             const junctionRecords = await this.csvManager.readCsvRecords(csvPath);
 
-            // Merge by external ID (junction records take priority for shared keys)
+            // Merge by external ID (main records take priority — they have complete lookup context)
             const externalId = objectConfig.externalId;
             const merged = new Map();
 
-            for (const record of mainRecords) {
+            for (const record of junctionRecords) {
                 const key = record[externalId];
                 if (key) merged.set(key, record);
             }
-            for (const record of junctionRecords) {
+            for (const record of mainRecords) {
                 const key = record[externalId];
                 if (key) merged.set(key, record);
             }
@@ -380,15 +500,17 @@ class DataManager {
     async updateSelfLookups(targetDir) {
         console.log(`\n🚀 Running Apex script to set parent names for self-referencing objects...`);
 
-        // Extract parent names from self-referencing objects
         for (const objectConfig of this.config.hierarchyObjects) {
-            const childParentMapping = await this.csvManager.getChildParentMapping(targetDir, objectConfig);
+            const hierarchies = Array.isArray(objectConfig.hierarchy) ? objectConfig.hierarchy : [objectConfig.hierarchy];
 
-            // Generate the Apex script
-            const apexPath = await this.sfManager.generateSelfLookupsScript(targetDir, objectConfig, childParentMapping);
+            for (const hierarchy of hierarchies) {
+                // Build a temporary config view with the specific hierarchy for this iteration
+                const hierarchyConfig = { ...objectConfig, hierarchy };
 
-            // Run the Apex script
-            await this.sfManager.runApex(apexPath);
+                const childParentMapping = await this.csvManager.getChildParentMapping(targetDir, hierarchyConfig);
+                const apexPath = await this.sfManager.generateSelfLookupsScript(targetDir, hierarchyConfig, childParentMapping);
+                await this.sfManager.runApex(apexPath);
+            }
         }
     }
 
@@ -398,5 +520,5 @@ class DataManager {
 }
 
 module.exports = {
-    DataManager
+    DataManager,
 };

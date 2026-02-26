@@ -10,7 +10,7 @@ const SALES_ORG_FIELDS = [
     'cgcloud__Sales_Org__c',
     'cgcloud__Sales_Org__r.cgcloud__Sales_Org_Value__c',
     'cgcloud__Sales_Organization__r.cgcloud__Sales_Org_Value__c',
-    'cgcloud__Unique_Key__c'
+    'cgcloud__Unique_Key__c',
 ];
 
 class JsonConverter {
@@ -20,6 +20,13 @@ class JsonConverter {
 
     async csvToJson() {
         console.log('📁 Converting CSV files to JSON...');
+
+        // Remove existing directory if it exists to refresh JSON files
+        if (await fs.pathExists(this.config.dataDir)) {
+            await fs.remove(this.config.dataDir);
+        }
+
+        await fs.ensureDir(this.config.dataDir);
 
         if (this.config.hasSalesOrgs) {
             for (const salesOrg of this.config.salesOrgs) {
@@ -37,6 +44,9 @@ class JsonConverter {
             console.log(`⚠️  CSV directory ${inputDir} not found, skipping...`);
             return;
         }
+
+        // Create JSON directory for the sales org
+        await fs.ensureDir(baseOutputDir);
 
         const csvFiles = await fs.readdir(inputDir);
 
@@ -58,16 +68,17 @@ class JsonConverter {
     }
 
     async convertCsvFileToJson(csvPath, objectConfig, baseOutputDir) {
-        if (this.config.verbose) {
-            console.log(`  📄 Converting ${objectConfig.objectName}...`);
-        }
-
         if (!objectConfig) {
             return null;
         }
 
+        if (this.config.verbose) {
+            console.log(`  📄 Converting ${objectConfig.objectName}...`);
+        }
+
         const outputDir = path.join(baseOutputDir, objectConfig.objectName);
 
+        // Make sure output directory exists for the object
         await fs.ensureDir(outputDir);
 
         const records = [];
@@ -114,11 +125,7 @@ class JsonConverter {
 
         if (this.config.hasSalesOrgs) {
             for (const salesOrg of this.config.salesOrgs) {
-                await this.convertJsonDirToCsv(
-                    path.join(this.config.dataDir, salesOrg.source),
-                    path.join(this.config.tmpDir, salesOrg.target),
-                    salesOrg
-                );
+                await this.convertJsonDirToCsv(path.join(this.config.dataDir, salesOrg.source), path.join(this.config.tmpDir, salesOrg.target), salesOrg);
             }
         } else {
             await this.convertJsonDirToCsv(this.config.dataDir, this.config.tmpDir);
@@ -219,7 +226,7 @@ class JsonConverter {
                         return value;
                     })
                     .join(',')
-            )
+            ),
         ].join('\n');
 
         await fs.writeFile(csvPath, csvContent);
@@ -262,5 +269,5 @@ class JsonConverter {
 }
 
 module.exports = {
-    JsonConverter
+    JsonConverter,
 };

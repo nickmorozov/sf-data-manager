@@ -53,7 +53,7 @@ class Config {
 
         this.salesOrgs = sourceOrgs.map((org, index) => ({
             source: org,
-            target: targetOrgs[index] || org // If no target is provided, use the source org
+            target: targetOrgs[index] || org, // If no target is provided, use the source org
         }));
 
         this.slim = options.slim || false;
@@ -123,6 +123,10 @@ class Config {
         return this._objects.filter((obj) => obj.junction);
     }
 
+    get unionObjects() {
+        return this._objects.filter((obj) => obj.union);
+    }
+
     get hierarchyObjects() {
         return this._objects.filter((obj) => obj.hierarchy);
     }
@@ -136,5 +140,5 @@ class Config {
 }
 
 module.exports = {
-    Config
+    Config,
 };
