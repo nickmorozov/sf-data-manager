@@ -189,11 +189,16 @@ class DataManager {
         try {
             console.log(`\n📊 Preparing data transfer for ${this.config.operation}...`);
 
+            await fs.ensureDir(targetDir);
+
+            // Pre-export: enrich queries with before-lookups (queries the org)
+            if (this.config.isExport && this.config.lookupObjects.length > 0) {
+                await this.applyBeforeLookups();
+            }
+
             if (this.config.verbose) {
                 console.log('Export configuration:', JSON.stringify(this.config.exportJson, null, 2));
             }
-
-            await fs.ensureDir(targetDir);
 
             const exportPath = path.join(targetDir, EXPORT_JSON);
 
@@ -214,9 +219,9 @@ class DataManager {
             const totalTime = (Date.now() - startTime) / 1000;
             console.log(`✅ ${this.capitalizeFirst(this.config.operation)} completed successfully in ${totalTime}s!`);
 
-            // Post-export: supplementary passes to fill in missing lookup records
+            // Post-export: resolve #N/A lookup values by querying the org directly
             if (this.config.isExport && this.config.lookupObjects.length > 0) {
-                await this.exportExtraLookups(targetDir);
+                await this.resolveAfterLookups(targetDir);
             }
         } catch (error) {
             const totalTime = (Date.now() - startTime) / 1000;
@@ -226,162 +231,238 @@ class DataManager {
     }
 
     /**
-     * Post-export: resolve all _lookup entries by reading referenced CSVs,
-     * identifying missing or filtered records, and running supplementary SFDMU exports.
+     * Pre-export: query the source org for each "before" lookup to enrich the first run's queries.
      *
-     * Handles three lookup patterns via a single unified mechanism:
-     *   - No filterBy: read objectName's CSV, extract fieldName values,
-     *     find THIS object's missing records by externalId (union/hierarchy)
-     *   - With filterBy: read objectName's CSV, extract fieldName values,
-     *     find THIS object's records WHERE filterBy IN (values) (junction)
-     *   - Self-referencing (objectName === this object, no filterBy):
-     *     iterates to resolve multi-level hierarchies (up to MAX_DEPTH)
+     * For each lookup object with before: true entries, queries the source org to find
+     * which records are referenced by other objects. Collects all values across lookups
+     * and adds them to the object's WHERE clause. Sets master: true since we now have
+     * a selective WHERE (rule: master: true when WHERE exists, false otherwise).
+     *
+     * Example: KPI_Set has 6 before-lookups from Promotion_Template, Account_Template, etc.
+     * Each is queried with its own WHERE (respecting sales org filters). The union of all
+     * results (e.g., 20 unique KPI_Set names) becomes KPI_Set's WHERE clause.
      */
-    async exportExtraLookups(targetDir) {
-        console.log(`\n🔗 Resolving lookups...`);
+    async applyBeforeLookups() {
+        const lookupObjects = this.config.lookupObjects.filter((obj) => obj._lookup.some((l) => l.before));
 
-        const MAX_DEPTH = 5;
-        let hasSelfRef = false;
+        if (lookupObjects.length === 0) return;
 
-        for (let iteration = 1; iteration <= MAX_DEPTH; iteration++) {
-            const objects = [];
-            const backupNames = new Set();
+        console.log(`\n🔗 Applying before-lookups...`);
 
-            for (const obj of this.config.lookupObjects) {
-                const allReferencedIds = new Set();
-                const filterClauses = [];
+        for (const obj of lookupObjects) {
+            const allValues = new Set();
+            const beforeLookups = obj._lookup.filter((l) => l.before);
 
-                for (const lookup of obj._lookup) {
-                    const isSelfRef = lookup.objectName === obj.objectName && !lookup.filterBy;
+            for (const lookup of beforeLookups) {
+                // Find the referenced object's export config to get its WHERE clause
+                const refObj = this.config.exportJson.objects.find((o) => o.objectName === lookup.objectName);
 
-                    // After first iteration, only process self-referencing lookups (hierarchy)
-                    if (iteration > 1 && !isSelfRef) continue;
-                    if (isSelfRef) hasSelfRef = true;
-
-                    // Read the lookup object's CSV and extract field values
-                    const csvPath = path.join(targetDir, lookup.objectName + CSV_EXTENSION);
-                    const records = await this.csvManager.readCsvRecords(csvPath);
-                    const values = [...new Set(records.map((r) => r[lookup.fieldName]).filter((v) => v && v !== '#N/A'))];
-
-                    if (values.length === 0) continue;
-
-                    if (lookup.filterBy) {
-                        // Junction: filter THIS object by the lookup field
-                        const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
-                        filterClauses.push(`${lookup.filterBy} IN (${idsString})`);
-                        console.log(`  📊 ${obj.objectName}: ${values.length} ${lookup.objectName} IDs for ${lookup.filterBy}`);
-                    } else {
-                        // Union/hierarchy: collect referenced IDs to check against already-exported
-                        for (const v of values) allReferencedIds.add(v);
-                    }
+                // Build SOQL: SELECT <fieldName> FROM <objectName> WHERE <referenced object's WHERE>
+                let whereClause = '';
+                if (refObj) {
+                    const whereMatch = refObj.query.match(/\bWHERE\s+(.+?)(?=\s+ORDER\s+BY\b|$)/i);
+                    if (whereMatch) whereClause = ` WHERE ${whereMatch[1]}`;
                 }
 
-                // For union/hierarchy: find which referenced IDs are missing from this object's CSV
-                if (allReferencedIds.size > 0) {
-                    const existingCsvPath = path.join(targetDir, obj.objectName + CSV_EXTENSION);
-                    const existingRecords = await this.csvManager.readCsvRecords(existingCsvPath);
-                    const exportedIds = new Set(existingRecords.map((r) => r[obj.externalId]).filter(Boolean));
-                    const missingIds = [...allReferencedIds].filter((v) => !exportedIds.has(v));
+                const soql = `SELECT ${lookup.fieldName} FROM ${lookup.objectName}${whereClause}`;
+                console.log(`  📊 Querying ${lookup.objectName} for ${lookup.fieldName}...`);
 
-                    if (missingIds.length > 0) {
-                        const idsString = missingIds.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
-                        filterClauses.push(`${obj.externalId} IN (${idsString})`);
-                        console.log(`  📊 ${obj.objectName}: ${missingIds.length} missing records${iteration > 1 ? ` (depth ${iteration})` : ''}`);
-                    } else if (iteration === 1 && filterClauses.length === 0) {
-                        console.log(`  ✅ ${obj.objectName}: all ${allReferencedIds.size} referenced records already exported`);
-                    }
+                try {
+                    const records = await this.sfManager.query(this.config.source, soql);
+                    const values = records.map((r) => this._extractNestedField(r, lookup.fieldName)).filter((v) => v && v !== '#N/A');
+
+                    for (const v of values) allValues.add(v);
+                    console.log(`  ✅ ${lookup.objectName}: ${new Set(values).size} unique values from ${records.length} records`);
+                } catch (error) {
+                    console.warn(`  ⚠️  Query failed for ${lookup.objectName}: ${error.message}`);
                 }
-
-                if (filterClauses.length === 0) continue;
-
-                // Build export object with combined WHERE clause
-                const exportObj = this.config.exportJson.objects.find((o) => o.objectName === obj.objectName);
-                if (!exportObj) continue;
-
-                const where = filterClauses.length === 1 ? filterClauses[0] : `(${filterClauses.join(' OR ')})`;
-                const [selectFrom] = exportObj.query.split(/ WHERE | ORDER BY /i);
-                const orderByMatch = exportObj.query.match(/ ORDER BY (.+)$/i);
-                const orderBy = orderByMatch ? ` ORDER BY ${orderByMatch[1]}` : '';
-
-                objects.push({
-                    ...exportObj,
-                    query: `${selectFrom} WHERE ${where}${orderBy}`,
-                    master: true,
-                });
-
-                backupNames.add(obj.objectName);
             }
 
-            if (objects.length === 0) {
-                if (iteration === 1) console.log(`  ✅ No missing lookup records`);
-                break;
+            if (allValues.size === 0) {
+                console.log(`  ⏭️  ${obj.objectName}: no before-lookup values found`);
+                continue;
             }
 
-            // Back up existing CSVs before supplementary export overwrites them
-            const backups = {};
-            for (const objectName of backupNames) {
-                const csvPath = path.join(targetDir, objectName + CSV_EXTENSION);
-                backups[objectName] = await this.csvManager.readCsvRecords(csvPath);
-            }
+            // Modify the export.json object entry
+            const exportObj = this.config.exportJson.objects.find((o) => o.objectName === obj.objectName);
+            if (!exportObj) continue;
 
-            try {
-                const lookupExportJson = { ...this.config.exportJson, objects };
+            // Build WHERE: externalId IN (all collected values)
+            const idsString = [...allValues].map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
+            const newCondition = `${obj.externalId} IN (${idsString})`;
 
-                if (this.config.verbose) {
-                    console.log(`  Export configuration:`, JSON.stringify(lookupExportJson, null, 2));
-                }
+            // Parse original query, preserve WHERE and ORDER BY
+            const selectFrom = exportObj.query.split(/\s+WHERE\s+|\s+ORDER\s+BY\s+/i)[0];
+            const originalWhereMatch = exportObj.query.match(/\bWHERE\s+(.+?)(?=\s+ORDER\s+BY\b|$)/i);
+            const orderByMatch = exportObj.query.match(/\bORDER\s+BY\s+(.+)$/i);
+            const orderBy = orderByMatch ? ` ORDER BY ${orderByMatch[1]}` : '';
 
-                const exportPath = path.join(targetDir, EXPORT_JSON);
-                await fs.writeJson(exportPath, lookupExportJson, { spaces: 2 });
-                await this.sfdmuManager.run(targetDir);
-                await this.mergeExportCsvs(targetDir, backups);
-            } catch (error) {
-                console.error(`  ❌ Failed to export lookup records: ${error.message}`);
-                throw error;
-            }
+            const where = originalWhereMatch ? `(${originalWhereMatch[1]}) OR ${newCondition}` : newCondition;
 
-            // Only iterate if there are self-referencing lookups (hierarchy)
-            if (!hasSelfRef) break;
+            exportObj.query = `${selectFrom} WHERE ${where}${orderBy}`;
+            exportObj.master = true; // WHERE present → master: true for relationship resolution
+
+            console.log(`  🔗 ${obj.objectName}: enriched with ${allValues.size} lookup values, master: true`);
         }
-
-        console.log(`✅ Lookup export completed`);
     }
 
     /**
-     * Merge backed-up CSV records with supplementary export results.
-     * Backed-up records take priority for duplicate external IDs (they have complete lookup context).
+     * Post-export: resolve #N/A lookup values by querying the org directly.
+     *
+     * Instead of running a supplementary SFDMU pass (which can hit URI Too Long errors
+     * with large record sets), this method:
+     * 1. Scans each lookup object's CSV for #N/A relationship field values
+     * 2. Queries the source org for the correct values
+     * 3. Patches the CSV with the real relationship values
+     *
+     * This gives SFDMU and the hierarchy-resolver addon the real values they need
+     * during import (e.g., Parent__r.Name = 'ActualRecord' instead of '#N/A').
      */
-    async mergeExportCsvs(targetDir, backups) {
-        for (const [objectName, backedUpRecords] of Object.entries(backups)) {
-            if (backedUpRecords.length === 0) continue;
+    async resolveAfterLookups(targetDir) {
+        const lookupObjects = this.config.lookupObjects.filter((obj) => obj._lookup.some((l) => !l.before));
 
-            const objectConfig = this.config.getObject(objectName);
-            if (!objectConfig) continue;
+        if (lookupObjects.length === 0) return;
 
-            const csvPath = path.join(targetDir, objectName + CSV_EXTENSION);
-            const newRecords = await this.csvManager.readCsvRecords(csvPath);
+        console.log(`\n🔗 Resolving lookup values...`);
 
-            const externalId = objectConfig.externalId;
-            const merged = new Map();
+        for (const obj of lookupObjects) {
+            const afterLookups = obj._lookup.filter((l) => !l.before);
+            const fieldNames = afterLookups.map((l) => l.fieldName);
 
-            // New records first, then backed-up records overwrite duplicates
-            for (const record of newRecords) {
-                const key = record[externalId];
-                if (key) merged.set(key, record);
-            }
-            for (const record of backedUpRecords) {
-                const key = record[externalId];
-                if (key) merged.set(key, record);
-            }
+            // Read this object's CSV
+            const csvPath = path.join(targetDir, obj.objectName + CSV_EXTENSION);
+            const records = await this.csvManager.readCsvRecords(csvPath);
 
-            const mergedRecords = Array.from(merged.values());
+            if (records.length === 0) continue;
 
-            if (mergedRecords.length !== newRecords.length) {
-                console.log(`  🔀 Merged ${objectName}: ${backedUpRecords.length} (existing) + ${newRecords.length} (new) → ${mergedRecords.length} unique records`);
+            // Find records where any lookup fieldName is #N/A
+            const recordsWithNA = records.filter((r) => fieldNames.some((f) => r[f] === '#N/A'));
+
+            if (recordsWithNA.length === 0) {
+                console.log(`  ✅ ${obj.objectName}: no #N/A lookup values`);
+                continue;
             }
 
-            await this.jsonConverter.writeRecordsToCsv(mergedRecords, csvPath);
+            // Collect externalIds of records with #N/A
+            const getKey = this._buildKeyFn(obj.externalId);
+            const idsWithNA = [...new Set(recordsWithNA.map(getKey).filter(Boolean))];
+
+            console.log(`  📊 ${obj.objectName}: ${idsWithNA.length} records with #N/A in ${fieldNames.length} lookup fields`);
+
+            // Query org for the correct lookup values
+            // SELECT <externalId>, <field1>, <field2>, ... FROM <object> WHERE <externalId> IN (...)
+            const selectFields = [obj.externalId, ...fieldNames];
+            const escape = (v) => v.replace(/'/g, "\\'");
+
+            // Batch the query if too many IDs (SOQL has ~20K char limit)
+            const BATCH_SIZE = 200;
+            const valueMap = new Map();
+
+            for (let i = 0; i < idsWithNA.length; i += BATCH_SIZE) {
+                const batch = idsWithNA.slice(i, i + BATCH_SIZE);
+                const idsString = batch.map((v) => `'${escape(v)}'`).join(', ');
+                const soql = `SELECT ${selectFields.join(', ')} FROM ${obj.objectName} WHERE ${obj.externalId} IN (${idsString})`;
+
+                try {
+                    const orgRecords = await this.sfManager.query(this.config.source, soql);
+
+                    for (const orgRecord of orgRecords) {
+                        const key = orgRecord[obj.externalId] || this._extractNestedField(orgRecord, obj.externalId);
+                        if (!key) continue;
+
+                        const values = {};
+                        for (const fieldName of fieldNames) {
+                            const val = this._extractNestedField(orgRecord, fieldName);
+                            if (val) values[fieldName] = val;
+                        }
+                        valueMap.set(key, values);
+                    }
+                } catch (error) {
+                    console.warn(`  ⚠️  Query failed for ${obj.objectName} (batch ${Math.floor(i / BATCH_SIZE) + 1}): ${error.message}`);
+                }
+            }
+
+            // Update CSV records with queried values
+            let updated = 0;
+            for (const record of records) {
+                const key = getKey(record);
+                const newValues = key ? valueMap.get(key) : null;
+                if (!newValues) continue;
+
+                for (const [field, value] of Object.entries(newValues)) {
+                    if (record[field] === '#N/A') {
+                        record[field] = value;
+                        updated++;
+                    }
+                }
+            }
+
+            if (updated > 0) {
+                await this._writeCsvRecords(csvPath, records);
+                console.log(`  ✅ ${obj.objectName}: resolved ${updated} lookup values`);
+            } else {
+                console.log(`  ✅ ${obj.objectName}: all lookups genuinely null in org`);
+            }
         }
+
+        console.log(`✅ Lookup resolution completed`);
+    }
+
+    /**
+     * Build a key extraction function for CSV records.
+     * Handles compound externalIds (semicolon-separated field names → concatenated values).
+     */
+    _buildKeyFn(externalId) {
+        if (externalId.includes(';')) {
+            const parts = externalId.split(';');
+            return (record) => {
+                const values = parts.map((p) => record[p]);
+                return values.every(Boolean) ? values.join(';') : null;
+            };
+        }
+        return (record) => record[externalId] || null;
+    }
+
+    /**
+     * Write records to a CSV file.
+     */
+    async _writeCsvRecords(filePath, records) {
+        if (records.length === 0) return;
+
+        const headers = Object.keys(records[0]);
+        const lines = [headers.join(',')];
+
+        for (const record of records) {
+            const values = headers.map((h) => this._csvEscape(record[h] ?? ''));
+            lines.push(values.join(','));
+        }
+
+        await fs.writeFile(filePath, lines.join('\n'));
+    }
+
+    /**
+     * Escape a value for CSV output.
+     */
+    _csvEscape(value) {
+        const str = String(value);
+        if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+            return '"' + str.replace(/"/g, '""') + '"';
+        }
+        return str;
+    }
+
+    /**
+     * Extract a value from a nested SOQL result using dot-separated field path.
+     * SOQL relationship queries return nested objects, e.g.:
+     *   SELECT cgcloud__KPI_Set__r.Name → { cgcloud__KPI_Set__r: { Name: 'value' } }
+     */
+    _extractNestedField(record, fieldPath) {
+        const parts = fieldPath.split('.');
+        let val = record;
+        for (const part of parts) {
+            val = val?.[part];
+        }
+        return val || null;
     }
 
     capitalizeFirst(str) {

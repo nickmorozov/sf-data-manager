@@ -265,6 +265,7 @@ class Config {
     get lookupObjects() {
         return this._rawConfig.objects.filter((o) => o._lookup);
     }
+
 }
 
 module.exports = {
