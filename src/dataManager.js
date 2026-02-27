@@ -6,7 +6,7 @@ const { JsonConverter } = require('./jsonConverter');
 const { SfdmuManager } = require('./lib/sfdmu');
 const { SfManager } = require('./lib/sf');
 
-const { LINE_REPEAT, PARENT_IDS_SLUG, CSV_EXTENSION } = require('./config/constants');
+const { LINE_REPEAT, CSV_EXTENSION } = require('./config/constants');
 
 const EXPORT_JSON = 'export.json';
 
@@ -45,7 +45,7 @@ class DataManager {
         console.log(`🔍 Verbose: ${this.config.verbose ? 'Enabled' : 'Disabled'}`);
         console.log('='.repeat(LINE_REPEAT));
 
-        if (this.config.hasSalesOrgs && (this.config.salesOrgs.length === 0 || this.config.isList)) {
+        if (this.config.hasSalesOrgs && this.config.salesOrgs.length === 0) {
             console.log('\n🔍 No sales orgs specified, fetching all available sales organizations...');
             await this.getAllSalesOrgs();
         }
@@ -70,15 +70,6 @@ class DataManager {
         const startTime = Date.now();
 
         try {
-            if (this.config.isList) {
-                if (!this.config.hasSalesOrgs) {
-                    console.log('This project does not use sales organizations.');
-                    return;
-                }
-                await this.listSalesOrgs();
-                return;
-            }
-
             if (this.config.hasSalesOrgs) {
                 await this.transferSalesOrgData();
             } else {
@@ -138,7 +129,7 @@ class DataManager {
     async getAllSalesOrgs() {
         try {
             const queryOrg = this.config.isImport ? this.config.target : this.config.source;
-            const allSalesOrgs = await this.sfManager.querySalesOrgs(queryOrg, this.config._salesOrgObject);
+            const allSalesOrgs = await this.sfManager.querySalesOrgs(queryOrg, this.config._salesOrgConfig);
 
             if (allSalesOrgs.length === 0) {
                 console.warn('⚠️ No sales organizations found in source org');
@@ -153,18 +144,6 @@ class DataManager {
             }));
         } catch (error) {
             console.error(`Error getting sales orgs: ${error.message}`);
-            throw error;
-        }
-    }
-
-    async listSalesOrgs() {
-        try {
-            console.log('Available Sales Organizations:');
-            this.config.salesOrgs.forEach((pair) => {
-                console.log(`- ${pair.source}`);
-            });
-        } catch (error) {
-            console.error(`Error listing sales orgs: ${error.message}`);
             throw error;
         }
     }
@@ -257,30 +236,43 @@ class DataManager {
         const sharedObjectNames = new Set();
 
         for (const junctionConfig of this.config.junctionObjects) {
-            const junctions = Array.isArray(junctionConfig.junction) ? junctionConfig.junction : [junctionConfig.junction];
+            const meta = this.config.getObjectMeta(junctionConfig.objectName);
+            const junctionMeta = meta?._junction;
+
+            // Skip if _junction is just a boolean flag (no detailed parent config)
+            if (!junctionMeta || typeof junctionMeta !== 'object') {
+                continue;
+            }
+
+            const junctions = Array.isArray(junctionMeta) ? junctionMeta : [junctionMeta];
+
+            // Separate objects list (first entry) from parent entries
+            const objectsEntry = junctions.find((j) => j.objects);
+            const parentEntries = junctions.filter((j) => j.parent);
 
             try {
-                // Collect parent IDs from all junction sources (OR-combined)
-                const allExternalIds = new Set();
-                for (const junction of junctions) {
+                // Build AND-joined WHERE: each parent contributes its own IN clause
+                const whereClauses = [];
+                for (const junction of parentEntries) {
                     const ids = await this.csvManager.getParentExternalIdsFromSalesOrg(targetDir, junction.parent);
-                    ids.forEach((id) => allExternalIds.add(id));
+                    if (ids.length === 0) {
+                        console.log(`  ⚠️ No records found for ${junction.parent.objectName}, skipping`);
+                        continue;
+                    }
+                    console.log(`  📊 Found ${ids.length} ${junction.parent.objectName} records: ${ids.join(', ')}`);
+                    const idsString = ids.map((id) => `'${id.replace(/'/g, "\\'")}'`).join(', ');
+                    whereClauses.push(`${junction.field} IN (${idsString})`);
                 }
-                const externalIds = Array.from(allExternalIds);
 
-                if (externalIds.length === 0) {
+                if (whereClauses.length === 0) {
                     console.log(`  ⚠️ No parent records found for ${junctionConfig.objectName}, skipping junction export`);
                     continue;
                 }
 
-                console.log(`  📊 Found ${externalIds.length} parent records for ${junctionConfig.objectName}: ${externalIds.join(', ')}`);
+                const where = whereClauses.join(' AND ');
 
-                // Create a WHERE clause for the parent IDs
-                const where = junctions[0].where.replace(PARENT_IDS_SLUG, externalIds.map((id) => `'${id.replace(/'/g, "\\'")}'`).join(', '));
-
-                // Create custom export configuration for junction records
-                let junctionObject = this.config.exportJson.objects.find((objectConfig) => objectConfig.objectName === junctionConfig.objectName);
                 // Build junction query: replace any existing WHERE with the junction WHERE
+                const junctionObject = this.config.exportJson.objects.find((obj) => obj.objectName === junctionConfig.objectName);
                 const [selectFrom] = junctionObject.query.split(/ WHERE|ORDER BY /i);
                 const orderBy = junctionObject.query.split(/ ORDER BY /i).pop();
                 objects.push({
@@ -289,28 +281,19 @@ class DataManager {
                     master: true,
                 });
 
-                // Collect shared objects from ALL junction configs
-                const sharedObjects = new Set();
-                for (const junction of junctions) {
-                    if (junction.objects) {
-                        junction.objects.forEach((name) => sharedObjects.add(name));
+                // Include shared objects for backup/merge
+                if (objectsEntry) {
+                    for (const parentName of objectsEntry.objects) {
+                        const parentObjectConfig = this.config.exportJson.objects.find((obj) => obj.objectName === parentName);
+                        if (!parentObjectConfig) {
+                            console.warn(`⚠️ Could not find configuration for ${parentName}, skipping`);
+                            continue;
+                        }
+                        if (!objects.some((obj) => obj.objectName === parentName)) {
+                            objects.push(parentObjectConfig);
+                        }
+                        sharedObjectNames.add(parentName);
                     }
-                }
-
-                for (const parentName of sharedObjects) {
-                    const parentObjectConfig = this.config.exportJson.objects.find((objectConfig) => objectConfig.objectName === parentName);
-
-                    if (!parentObjectConfig) {
-                        console.warn(`⚠️ Could not find configuration for ${parentName}, skipping`);
-                        continue;
-                    }
-
-                    if (!objects.some((objectConfig) => objectConfig.objectName === parentName)) {
-                        objects.push(parentObjectConfig);
-                    }
-
-                    // Track shared objects so we can merge CSVs after junction export
-                    sharedObjectNames.add(parentName);
                 }
             } catch (error) {
                 console.error(`❌ Failed to export ${junctionConfig.objectName}: ${error.message}`);

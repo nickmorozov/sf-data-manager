@@ -194,9 +194,9 @@ class JsonConverter {
 
                 // Force pushable to false on first import
                 if (file.includes(objectName) && !this.config.madeTemporaryImport) {
-                    const objectConfig = this.config.getObject(objectName);
+                    const meta = this.config.getObjectMeta(objectName);
 
-                    for (const [fieldName, temporaryValue] of Object.entries(objectConfig?.temporaryValues || {})) {
+                    for (const [fieldName, temporaryValue] of Object.entries(meta?._temporaryValues || {})) {
                         if (record.hasOwnProperty(fieldName) && record[fieldName] !== temporaryValue) {
                             record[fieldName] = temporaryValue;
                             this.config.needTemporaryImport = true;

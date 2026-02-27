@@ -69,11 +69,11 @@ export default class UnionResolverAddon {
 
             this._log(`Found ${allIds.size} combined IDs for ${objectName}`);
 
-            // Build flat WHERE and replace in query
+            // Build flat WHERE from externalId
             const idsStr = Array.from(allIds)
                 .map((id) => `'${id.replace(/'/g, "\\'")}'`)
                 .join(', ');
-            const flatWhere = unionConfig.where.replace('${PARENT_IDS}', idsStr);
+            const flatWhere = `${unionConfig.externalId} IN (${idsStr})`;
 
             if (exportObj) {
                 const m = exportObj.query.match(/^(.+? WHERE )(.+)( ORDER BY .+)$/i);

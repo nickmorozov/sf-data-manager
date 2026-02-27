@@ -7,12 +7,12 @@ const { program } = require('commander');
 const { DataManager } = require('./dataManager');
 const { Config } = require('./config/config');
 
-const { OPERATIONS, DEFAULT_TIMEOUT, LOG_LEVELS } = require('./config/constants');
+const { DEFAULT_TIMEOUT, LOG_LEVELS } = require('./config/constants');
 
 async function main() {
     program
         .description('Export/import Salesforce data using SFDMU')
-        .argument('[operation]', `Operation (${Object.values(OPERATIONS).join(', ')})`, OPERATIONS.HELP)
+        .argument('<operation>', 'Operation: export or import')
         .option('-s, --source <source>', 'Source org alias or username', process.env.SOURCE_ALIAS ?? '')
         .option('-t, --target <target>', 'Target org alias or username', process.env.TARGET_ALIAS ?? '')
         .option(
@@ -31,24 +31,9 @@ async function main() {
         .option('--simulation', 'No data will be transferred, but the tool will show the list of objects and fields that will be processed.')
         .option('--all-or-none', 'Setting this property to true will prevent partial updates.')
         .option('--timeout <timeout>', 'Timeout for SFDMU operations in seconds.', DEFAULT_TIMEOUT)
-        .option('--log-level <logLevel>', 'Timeout for SFDMU operations in seconds.', LOG_LEVELS.ERROR)
-        .option('--version-info', 'Show SFDMU version information')
-        .option('-h, --help', 'Displays help for the command')
+        .option('--log-level <logLevel>', 'Log level for SFDMU operations.', LOG_LEVELS.ERROR)
         .action(async (operation, options) => {
             try {
-                if (operation === OPERATIONS.HELP || options.help) {
-                    console.log(program.helpInformation());
-                    process.exit(0);
-                }
-
-                // Show version info if requested
-                if (options.versionInfo) {
-                    console.log('\n📋 SF Data Manager v1.0.0');
-                    const sfdmuVersion = await this.sfdmuManager.getVersion();
-                    console.log(`🔧 SFDMU Plugin: ${sfdmuVersion}`);
-                    console.log('');
-                }
-
                 const config = new Config(operation, options);
 
                 const dataManager = new DataManager(config);
