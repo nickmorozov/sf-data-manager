@@ -281,19 +281,23 @@ class DataManager {
                     master: true,
                 });
 
-                // Include shared objects for backup/merge
-                if (objectsEntry) {
-                    for (const parentName of objectsEntry.objects) {
-                        const parentObjectConfig = this.config.exportJson.objects.find((obj) => obj.objectName === parentName);
-                        if (!parentObjectConfig) {
-                            console.warn(`⚠️ Could not find configuration for ${parentName}, skipping`);
-                            continue;
-                        }
-                        if (!objects.some((obj) => obj.objectName === parentName)) {
-                            objects.push(parentObjectConfig);
-                        }
-                        sharedObjectNames.add(parentName);
+                // Include parent objects so SFDMU can resolve relationship fields.
+                // If an explicit objects list is provided, use only those;
+                // otherwise include all non-junction objects for a full second run.
+                const parentNames = objectsEntry
+                    ? objectsEntry.objects
+                    : this.config.exportJson.objects.map((obj) => obj.objectName).filter((name) => name !== junctionConfig.objectName);
+
+                for (const parentName of parentNames) {
+                    const parentObjectConfig = this.config.exportJson.objects.find((obj) => obj.objectName === parentName);
+                    if (!parentObjectConfig) {
+                        console.warn(`⚠️ Could not find configuration for ${parentName}, skipping`);
+                        continue;
                     }
+                    if (!objects.some((obj) => obj.objectName === parentName)) {
+                        objects.push(parentObjectConfig);
+                    }
+                    sharedObjectNames.add(parentName);
                 }
             } catch (error) {
                 console.error(`❌ Failed to export ${junctionConfig.objectName}: ${error.message}`);

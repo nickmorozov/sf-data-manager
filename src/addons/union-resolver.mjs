@@ -21,12 +21,16 @@ export default class UnionResolverAddon {
         const script = this.runtime.getScript();
         const unions = args.unions || {};
 
+        // SFDMU moves flat objects[] into objectSets[0] during normalization,
+        // leaving script.objects empty. Use getAllObjects() to access all objects.
+        const allObjects = script.getAllObjects?.() || script.objects || [];
+
         for (const [objectName, unionConfig] of Object.entries(unions)) {
             const allIds = new Set();
 
             // Query each parent object for referencing field values
             for (const parent of unionConfig.parents) {
-                const parentObj = script.objects.find((o) => o.objectName === parent.objectName);
+                const parentObj = this._findObject(allObjects, parent.objectName);
                 if (!parentObj) {
                     this._log(`Parent ${parent.objectName} not found in script objects, skipping`);
                     continue;
@@ -48,7 +52,7 @@ export default class UnionResolverAddon {
 
             // Also flatten the object's own WHERE clause to IDs
             // (SOQL forbids combining semi-join subselects with OR)
-            const exportObj = script.objects.find((o) => o.objectName === objectName);
+            const exportObj = this._findObject(allObjects, objectName);
             if (exportObj) {
                 const origWhere = exportObj.query.match(/ WHERE (.+?)(?= ORDER BY )/i);
                 if (origWhere) {
@@ -94,6 +98,15 @@ export default class UnionResolverAddon {
 
     async onExecute(context, args) {
         return { cancel: false };
+    }
+
+    /**
+     * Find an object by API name in the script objects list.
+     * SFDMU exposes the API name as `name` (set from query parsing)
+     * and may also retain `objectName` from the raw export.json config.
+     */
+    _findObject(objects, objectName) {
+        return objects.find((o) => o.name === objectName || o.objectName === objectName);
     }
 
     /**
