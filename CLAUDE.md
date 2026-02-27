@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-SF Data Manager is a Node.js CLI tool that wraps SFDMU (Salesforce Data Move Utility) to export/import Salesforce data. It reads object definitions from YAML config files in the consumer project, making it reusable across different Salesforce projects.
+SF Data Manager is a Node.js CLI tool that wraps SFDMU (Salesforce Data Move Utility) to export/import Salesforce data. It reads object definitions from JSON config files in the consumer project, making it reusable across different Salesforce projects.
 
-This repo is designed to be used as a **git submodule** in consumer projects. It is not standalone — it expects to be run from within a consumer project that has a `config/<name>.yaml` file.
+This repo is designed to be used as a **git submodule** in consumer projects. It is not standalone — it expects to be run from within a consumer project that has a `config/<operation>.json` file.
 
 ## Running
 
@@ -48,16 +48,13 @@ Commander.js CLI. Parses args, creates `Config`, creates `DataManager`, runs `in
 
 **Config** — `src/config/`
 
-- `config.js` — `Config` class. Loads YAML via `configLoader`, validates options, resolves paths, creates `ExportJson`. Getters expose filtered object lists: `allObjects`, `slimObjects`, `junctionObjects`, `hierarchyObjects`.
-- `configLoader.js` — Finds and merges `.yaml`/`.yml` files in consumer's `config/` dir.
-- `exportJson.js` — Builds the SFDMU `export.json` structure. Emits add-on manifests: script-level `beforeAddons` for union resolution (export), per-object `afterUpdateAddons` for hierarchy repair (import).
-- `objectConfig.js` — Generates per-object SFDMU config: SOQL queries, WHERE/ORDER BY clauses, placeholder substitution (`${SALES_ORGS}`, `${PARENT_IDS}`).
+- `config.js` — `Config` class. Loads JSON config from consumer project's `config/<operation>.json`, validates CLI options, resolves paths, builds SFDMU `export.json` with `_`-prefixed metadata stripped. Getters expose filtered object lists: `referenceObjects`, `lookupObjects`, `junctionObjects`, `hierarchyObjects`. Builds hierarchy-resolver addon manifests on import.
 - `constants.js` — Shared constants: `OPERATIONS`, `LOG_LEVELS`, `DEFAULT_TIMEOUT` (300s), placeholder slugs.
 
 **Core** — `src/`
 
-- `dataManager.js` — Orchestrator. Routes to single or multi-sales-org transfer. Handles junction exports, two-step temporary-value imports, and post-operation error analysis.
-- `csvManager.js` — CSV parsing (with BOM support via `csv-parse`). Extracts sales orgs, parent IDs, hierarchy mappings. Analyzes SFDMU error reports (`CSVIssuesReport.csv`, `MissingParentRecordsReport.csv`).
+- `dataManager.js` — Orchestrator. Routes to single or multi-sales-org transfer. Pre-export: enriches queries via `_reference` org queries. Post-first-run: filters junctions via `_junction` parent CSVs and runs SFDMU again. Post-export: resolves `#N/A` values via `_lookup`/`_hierarchy` org queries. Handles two-step temporary-value imports and post-operation error analysis.
+- `csvManager.js` — CSV parsing (with BOM support via `csv-parse`). Analyzes SFDMU error reports (`CSVIssuesReport.csv`, `MissingParentRecordsReport.csv`).
 - `jsonConverter.js` — Bidirectional CSV↔JSON. Each record becomes a separate JSON file named by external ID. Handles compound IDs (semicolon-separated), sales org field remapping, filename sanitization, and manual CSV quoting.
 
 **CLI Wrappers** — `src/lib/`
@@ -71,21 +68,36 @@ Commander.js CLI. Parses args, creates `Config`, creates `DataManager`, runs `in
 
 **Two-step import.** Objects with `temporaryValues` get imported twice: first with placeholder values (to satisfy required lookups), then again with real values. Tracked via `config.needTemporaryImport` / `config.madeTemporaryImport`.
 
-**Junction record export.** Junction objects need a secondary SFDMU run with a dynamically-built WHERE clause (replacing `${PARENT_IDS}` with actual IDs extracted from the first export's CSV). Shared parent object CSVs are backed up and merged after.
+**Export pipeline.** Pre-processing enriches queries, then one or two SFDMU runs, then post-processing:
+1. `_reference` — Query org for objects referencing this one, enrich WHERE with their values (OR'd with original)
+2. SFDMU run 1 (all objects)
+3. `_junction` — Read parent CSVs from run 1, build junction WHERE (AND'd across parents), run SFDMU again with only junctions (replaces unfiltered CSVs)
+4. `_lookup` + `_hierarchy` — Scan CSVs for `#N/A` relationship values, query source org for real values, patch CSVs
+5. CSV → JSON conversion
 
-**SFDMU add-ons** (`src/addons/`). Two native SFDMU add-ons handle processing that was previously done by the wrapper:
-- `union-resolver.mjs` — Script-level `beforeAddons` hook (export). Queries source org for parent field values, collects IDs from all union parents, rewrites WHERE clauses with flat `IN (...)` lists. Eliminates semi-join subselects that SOQL can't combine with OR.
-- `hierarchy-resolver.mjs` — Per-object `afterUpdateAddons` hook (import). Reads CSV for child→parent mapping, queries target org for record IDs, updates self-referencing lookup fields via DML. Replaces the previous Apex-based approach.
+**Import pipeline.** Single SFDMU run with hierarchy resolution:
+1. JSON → CSV conversion
+2. SFDMU run (upserts all records, self-referencing lookups left NULL)
+3. `_hierarchy` addon fires per-object: reads CSV for child→parent mapping, queries target org for IDs, DML updates self-lookups
 
-### YAML Config Schema
+**SFDMU add-ons** (`src/addons/`):
+- `union-resolver.mjs` — Script-level `beforeAddons` hook (export). Queries source org for parent field values, rewrites WHERE clauses with flat `IN (...)` lists for objects using subselect-based filters.
+- `hierarchy-resolver.mjs` — Per-object `afterUpdateAddons` hook (import). Reads CSV for child→parent mapping, queries target org for record IDs, updates self-referencing lookup fields via DML.
 
-Consumer projects provide `config/<name>.yaml`:
+### JSON Config Schema
 
-- `name` — Project name
-- `dataDir` — JSON storage directory (default: `data`)
-- `tmpDir` — CSV working directory (default: `tmp`)
-- `salesOrg` — Optional object config enabling sales org partitioning
-- `objects[]` — Salesforce object definitions with: `objectName`, `externalId`, `fields`, `where`, `orderBy`, `operation` (default Upsert), `master`, `slim`, `junction`, `hierarchy`, `temporaryValues`, `excludedFields`
+Consumer projects provide `config/<operation>.json` (e.g., `config/export.json`):
+
+- `_dataDir` — JSON storage directory (default: `data`)
+- `_salesOrg` — Optional `{ objectName, externalId }` enabling sales org partitioning
+- `excludeIdsFromCSVFiles`, `promptOnIssuesInCSVFiles`, `promptOnMissingParentObjects` — SFDMU flags
+- `objects[]` — Salesforce object definitions with standard SFDMU properties plus `_`-prefixed metadata:
+  - `_reference` — `[{ objectName, fieldName }]`: pre-export WHERE enrichment from referencing objects
+  - `_junction` — `[{ objectName, lookup }]`: post-first-run WHERE enrichment from parent CSVs
+  - `_lookup` — `[{ objectName, fieldName }]`: post-export `#N/A` resolution by querying source org
+  - `_hierarchy` — `[{ fieldName }]`: post-export `#N/A` resolution + import hierarchy-resolver addon
+  - `_slim` — Include in slim imports
+  - `_salesOrgObject` — Marks the sales org object itself
 
 ## Conventions
 
