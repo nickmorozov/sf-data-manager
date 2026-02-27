@@ -249,7 +249,9 @@ class DataManager {
     async applyBeforeReferences() {
         const refObjects = this.config.referenceObjects;
 
-        if (refObjects.length === 0) return;
+        if (refObjects.length === 0) {
+            return;
+        }
 
         console.log(`\n🔗 Applying references...`);
 
@@ -264,7 +266,9 @@ class DataManager {
                 let whereClause = '';
                 if (refObj) {
                     const whereMatch = refObj.query.match(/\bWHERE\s+(.+?)(?=\s+ORDER\s+BY\b|$)/i);
-                    if (whereMatch) whereClause = ` WHERE ${whereMatch[1]}`;
+                    if (whereMatch) {
+                        whereClause = ` WHERE ${whereMatch[1]}`;
+                    }
                 }
 
                 const soql = `SELECT ${lookup.fieldName} FROM ${lookup.objectName}${whereClause}`;
@@ -288,7 +292,9 @@ class DataManager {
 
             // Modify the export.json object entry
             const exportObj = this.config.exportJson.objects.find((o) => o.objectName === obj.objectName);
-            if (!exportObj) continue;
+            if (!exportObj) {
+                continue;
+            }
 
             // Build WHERE: externalId IN (all collected values)
             const idsString = [...allValues].map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
@@ -322,7 +328,9 @@ class DataManager {
         for (const obj of this.config.exportJson.objects) {
             const meta = this.config.getObjectMeta(obj.objectName);
             const temporaryValues = meta?._temporaryValues;
-            if (!temporaryValues) continue;
+            if (!temporaryValues) {
+                continue;
+            }
 
             // Query target org for records that need updating
             const fields = Object.keys(temporaryValues);
@@ -337,7 +345,9 @@ class DataManager {
                 const realValues = new Map();
                 for (const csvRecord of csvRecords) {
                     const key = csvRecord[obj.externalId];
-                    if (!key) continue;
+                    if (!key) {
+                        continue;
+                    }
                     const values = {};
                     for (const field of fields) {
                         if (csvRecord[field] !== undefined && csvRecord[field] !== temporaryValues[field]) {
@@ -468,31 +478,43 @@ class DataManager {
             const filterClauses = [];
 
             for (const junction of obj._junction) {
-                // Look up parent object's externalId from config
-                const parentObj = this.config.getObject(junction.objectName);
-                if (!parentObj) {
-                    console.warn(`  ⚠️  Parent object ${junction.objectName} not found in config`);
-                    continue;
-                }
-
-                // Read parent object's CSV to get exported values
+                // Read source object's CSV to get exported values
                 const csvPath = path.join(targetDir, junction.objectName + CSV_EXTENSION);
                 const records = await this.csvManager.readCsvRecords(csvPath);
 
                 if (records.length === 0) {
-                    console.warn(`  ⚠️  No CSV records for parent ${junction.objectName}`);
+                    console.warn(`  ⚠️  No CSV records for ${junction.objectName}`);
                     continue;
                 }
 
-                // Collect unique parent values using the parent's externalId
-                const values = [...new Set(
-                    records.map((r) => r[parentObj.externalId]).filter(Boolean)
-                )];
+                if (junction.column) {
+                    // Column mode: read specific column from source CSV, filter by this object's externalId
+                    const values = [...new Set(
+                        records.map((r) => r[junction.column]).filter((v) => v && v !== '#N/A')
+                    )];
 
-                if (values.length > 0) {
-                    const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
-                    filterClauses.push(`${junction.lookup} IN (${idsString})`);
-                    console.log(`  📊 ${obj.objectName}: ${values.length} ${junction.objectName} values for ${junction.lookup}`);
+                    if (values.length > 0) {
+                        const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
+                        filterClauses.push(`${obj.externalId} IN (${idsString})`);
+                        console.log(`  📊 ${obj.objectName}: ${values.length} values from ${junction.objectName}.${junction.column}`);
+                    }
+                } else {
+                    // Standard junction: read parent's externalId, filter by junction lookup field
+                    const parentObj = this.config.getObject(junction.objectName);
+                    if (!parentObj) {
+                        console.warn(`  ⚠️  Parent object ${junction.objectName} not found in config`);
+                        continue;
+                    }
+
+                    const values = [...new Set(
+                        records.map((r) => r[parentObj.externalId]).filter(Boolean)
+                    )];
+
+                    if (values.length > 0) {
+                        const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
+                        filterClauses.push(`${junction.lookup} IN (${idsString})`);
+                        console.log(`  📊 ${obj.objectName}: ${values.length} ${junction.objectName} values for ${junction.lookup}`);
+                    }
                 }
             }
 

@@ -17,7 +17,9 @@ class CsvManager {
      * Read all records from a CSV file
      */
     async readCsvRecords(csvPath) {
-        if (!(await fs.pathExists(csvPath))) return [];
+        if (!(await fs.pathExists(csvPath))) {
+            return [];
+        }
 
         return new Promise((resolve, reject) => {
             const records = [];

@@ -106,7 +106,9 @@ class Config {
      */
     getObjectMeta(objectName) {
         const obj = this._rawConfig.objects.find((o) => o.objectName === objectName);
-        if (!obj) return null;
+        if (!obj) {
+            return null;
+        }
 
         const meta = {};
         for (const [key, value] of Object.entries(obj)) {
@@ -188,7 +190,9 @@ class Config {
      * Substitute ${SALES_ORGS} placeholder in a query string.
      */
     _substituteQuery(query, isSalesOrgObject) {
-        if (!query.includes(SALES_ORGS_SLUG)) return query;
+        if (!query.includes(SALES_ORGS_SLUG)) {
+            return query;
+        }
 
         const salesOrgsString = this.salesOrgs
             ?.map((salesOrgs) => `'${this.isExport ? salesOrgs.source : salesOrgs.target}'`)
