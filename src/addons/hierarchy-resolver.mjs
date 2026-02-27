@@ -66,7 +66,7 @@ export default class HierarchyResolverAddon {
 
         if (updates.length > 0) {
             this._log(`Updating ${updates.length} self-lookup hierarchies for ${objectName}`);
-            await this.runtime.updateTargetRecordsAsync(objectName, 'Update', updates);
+            await this.runtime.updateTargetRecordsAsync(objectName, 1, updates);
             this._log(`Successfully updated ${updates.length} records`);
         }
 
