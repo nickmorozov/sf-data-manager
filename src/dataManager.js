@@ -448,16 +448,14 @@ class DataManager {
                 continue;
             }
 
-            // Query target org for records that need updating
             const fields = Object.keys(temporaryValues);
-            const soql = `SELECT Id, ${obj.externalId}, ${fields.join(', ')} FROM ${obj.objectName}`;
 
             try {
-                const records = await this.sfManager.query(this.config.target, soql);
+                // Read CSV first to identify which records need restoring
                 const csvPath = path.join(this.config.tmpDir, this.config.targetOrg || '', obj.objectName + CSV_EXTENSION);
                 const csvRecords = await this.csvManager.readCsvRecords(csvPath);
 
-                // Build externalId → real values map from the original JSON data
+                // Build externalId → real values map (only records that differ from temporary)
                 const realValues = new Map();
                 for (const csvRecord of csvRecords) {
                     const key = csvRecord[obj.externalId];
@@ -474,6 +472,18 @@ class DataManager {
                         realValues.set(key, values);
                     }
                 }
+
+                if (realValues.size === 0) {
+                    console.log(`  ✅ ${obj.objectName}: no temporary values to restore`);
+                    continue;
+                }
+
+                // Query target org scoped to only the records that need restoring
+                const escape = (v) => v.replace(/'/g, "\\'");
+                const idsString = [...realValues.keys()].map((v) => `'${escape(v)}'`).join(', ');
+                const soql = `SELECT Id, ${obj.externalId} FROM ${obj.objectName} WHERE ${obj.externalId} IN (${idsString})`;
+
+                const records = await this.sfManager.query(this.config.target, soql);
 
                 // Match org records by externalId and build updates
                 const updates = [];
@@ -512,13 +522,19 @@ class DataManager {
         for (const obj of this.config.hierarchyObjects) {
             const externalId = obj.externalId;
 
+            // Read CSV once per object
+            const csvPath = path.join(this.config.tmpDir, this.config.targetOrg || '', obj.objectName + CSV_EXTENSION);
+            const records = await this.csvManager.readCsvRecords(csvPath);
+
+            // Build child→parent mappings for all hierarchy fields at once
+            // Key: parentIdField (__c), Value: Map<childExtId, parentExtId>
+            const fieldMappings = new Map();
+            const allExtIds = new Set();
+            let hasAnyHierarchy = false;
+
             for (const hierarchy of obj._hierarchy) {
                 const parentField = hierarchy.fieldName; // e.g. "cgcloud__Parent__r.Name"
                 const parentIdField = parentField.replace(/__r\..+$/, '__c'); // e.g. "cgcloud__Parent__c"
-
-                // Read CSV to build child→parent external ID mapping
-                const csvPath = path.join(this.config.tmpDir, this.config.targetOrg || '', obj.objectName + CSV_EXTENSION);
-                const records = await this.csvManager.readCsvRecords(csvPath);
 
                 const childParentMap = new Map();
                 for (const record of records) {
@@ -526,49 +542,60 @@ class DataManager {
                     const parentId = (record[parentField] || '').trim();
                     if (childId && parentId && childId !== parentId) {
                         childParentMap.set(childId, parentId);
+                        allExtIds.add(childId);
+                        allExtIds.add(parentId);
                     }
                 }
 
                 if (childParentMap.size === 0) {
                     console.log(`  ✅ ${obj.objectName}.${parentField}: no hierarchies`);
-                    continue;
+                } else {
+                    fieldMappings.set(parentIdField, { parentField, childParentMap });
+                    hasAnyHierarchy = true;
+                }
+            }
+
+            if (!hasAnyHierarchy) continue;
+
+            // Single query for all hierarchy fields on this object
+            const escape = (v) => v.replace(/'/g, "\\'");
+            const idsString = [...allExtIds].map((v) => `'${escape(v)}'`).join(', ');
+            const soql = `SELECT Id, ${externalId} FROM ${obj.objectName} WHERE ${externalId} IN (${idsString})`;
+
+            try {
+                const orgRecords = await this.sfManager.query(this.config.target, soql);
+
+                // Build externalId → real Id map
+                const extIdToRealId = new Map();
+                for (const r of orgRecords) {
+                    extIdToRealId.set(r[externalId], r.Id);
                 }
 
-                // Query target org for real Salesforce IDs
-                const allExtIds = [...new Set([...childParentMap.keys(), ...childParentMap.values()])];
-                const escape = (v) => v.replace(/'/g, "\\'");
-                const idsString = allExtIds.map((v) => `'${escape(v)}'`).join(', ');
-                const soql = `SELECT Id, ${externalId} FROM ${obj.objectName} WHERE ${externalId} IN (${idsString})`;
-
-                try {
-                    const orgRecords = await this.sfManager.query(this.config.target, soql);
-
-                    // Build externalId → real Id map
-                    const extIdToRealId = new Map();
-                    for (const r of orgRecords) {
-                        extIdToRealId.set(r[externalId], r.Id);
-                    }
-
-                    // Build updates
-                    const updates = [];
+                // Merge updates across all hierarchy fields into one update per record
+                const updateMap = new Map(); // childRealId → update object
+                for (const [parentIdField, { parentField, childParentMap }] of fieldMappings) {
+                    let count = 0;
                     for (const [childExtId, parentExtId] of childParentMap) {
                         const childRealId = extIdToRealId.get(childExtId);
                         const parentRealId = extIdToRealId.get(parentExtId);
                         if (childRealId && parentRealId) {
-                            updates.push({ Id: childRealId, [parentIdField]: parentRealId });
+                            if (!updateMap.has(childRealId)) {
+                                updateMap.set(childRealId, { Id: childRealId });
+                            }
+                            updateMap.get(childRealId)[parentIdField] = parentRealId;
+                            count++;
                         }
                     }
-
-                    if (updates.length > 0) {
-                        console.log(`  📊 ${obj.objectName}.${parentField}: updating ${updates.length} records`);
-                        await this.sfManager.update(this.config.target, obj.objectName, updates);
-                        console.log(`  ✅ ${obj.objectName}.${parentField}: resolved`);
-                    } else {
-                        console.log(`  ✅ ${obj.objectName}.${parentField}: no updates needed`);
-                    }
-                } catch (error) {
-                    console.warn(`  ⚠️  Failed to resolve hierarchy for ${obj.objectName}.${parentField}: ${error.message}`);
+                    console.log(`  ${count > 0 ? '📊' : '✅'} ${obj.objectName}.${parentField}: ${count > 0 ? `${count} records` : 'no updates needed'}`);
                 }
+
+                const updates = [...updateMap.values()];
+                if (updates.length > 0) {
+                    await this.sfManager.update(this.config.target, obj.objectName, updates);
+                    console.log(`  ✅ ${obj.objectName}: resolved ${updates.length} records across ${fieldMappings.size} fields`);
+                }
+            } catch (error) {
+                console.warn(`  ⚠️  Failed to resolve hierarchies for ${obj.objectName}: ${error.message}`);
             }
         }
     }
