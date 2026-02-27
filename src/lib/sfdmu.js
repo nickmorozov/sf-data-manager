@@ -70,7 +70,7 @@ class SfdmuManager {
             `--sourceusername "${this.config.source}"`,
             `--targetusername "${this.config.target}"`,
             '--logfullquery',
-            this.config.verbose ? '--verbose' : '',
+            this.config.verbose ? '--verbose --diagnostic' : '',
         ].join(' ');
     }
 
