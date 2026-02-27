@@ -215,7 +215,12 @@ class DataManager {
                 }
             }
 
-            // Post-first-export: filter and export junction objects in a second SFDMU run
+            // Post-first-export: resolve after-references (CSV-scoped org queries)
+            if (this.config.isExport && this.config.referenceObjects.some((o) => o._reference.some((r) => r.after))) {
+                await this.applyAfterReferences(targetDir);
+            }
+
+            // Post-export: filter and export junction objects
             if (this.config.isExport && this.config.junctionObjects.length > 0) {
                 await this.exportJunctions(targetDir);
             }
@@ -259,6 +264,8 @@ class DataManager {
             const allValues = new Set();
 
             for (const lookup of obj._reference) {
+                if (lookup.after) continue; // Handled by applyAfterReferences()
+
                 // Find the referenced object's export config to get its WHERE clause
                 const refObj = this.config.exportJson.objects.find((o) => o.objectName === lookup.objectName);
 
@@ -313,6 +320,115 @@ class DataManager {
 
             console.log(`  🔗 ${obj.objectName}: enriched with ${allValues.size} reference values, master: true`);
         }
+    }
+
+    /**
+     * Post-first-export: resolve _reference entries with after: true.
+     *
+     * Like applyBeforeReferences() but scoped to actually-exported records.
+     * Reads the source object's CSV from run 1 to get exported external IDs,
+     * then queries the org for relationship values using only those IDs.
+     * This avoids picking up unrelated records when the source object has no
+     * WHERE clause (e.g., KPI_Definition has no sales org filter).
+     *
+     * After building WHERE clauses, runs SFDMU again for the enriched objects.
+     */
+    async applyAfterReferences(targetDir) {
+        const refObjects = this.config.referenceObjects;
+        const afterRefObjects = [];
+
+        console.log(`\n🔗 Applying after-references...`);
+
+        for (const obj of refObjects) {
+            const afterRefs = obj._reference.filter((r) => r.after);
+            if (afterRefs.length === 0) continue;
+
+            const allValues = new Set();
+
+            for (const lookup of afterRefs) {
+                // Read source object's CSV from run 1
+                const csvPath = path.join(targetDir, lookup.objectName + CSV_EXTENSION);
+                const records = await this.csvManager.readCsvRecords(csvPath);
+
+                if (records.length === 0) {
+                    console.warn(`  ⚠️  No CSV records for ${lookup.objectName}`);
+                    continue;
+                }
+
+                // Get exported external IDs from CSV
+                const sourceObj = this.config.getObject(lookup.objectName);
+                if (!sourceObj) {
+                    console.warn(`  ⚠️  Source object ${lookup.objectName} not found in config`);
+                    continue;
+                }
+
+                const extIds = [...new Set(records.map((r) => r[sourceObj.externalId]).filter(Boolean))];
+                if (extIds.length === 0) continue;
+
+                // Query org for relationship values, scoped to exported records
+                const escape = (v) => v.replace(/'/g, "\\'");
+                const idsString = extIds.map((v) => `'${escape(v)}'`).join(', ');
+                const soql = `SELECT ${lookup.fieldName} FROM ${lookup.objectName} WHERE ${sourceObj.externalId} IN (${idsString})`;
+
+                console.log(`  📊 Querying ${lookup.objectName} for ${lookup.fieldName} (${extIds.length} exported records)...`);
+
+                try {
+                    const orgRecords = await this.sfManager.query(this.config.source, soql);
+                    const values = orgRecords
+                        .map((r) => this._extractNestedField(r, lookup.fieldName))
+                        .filter((v) => v && v !== '#N/A');
+
+                    for (const v of values) allValues.add(v);
+                    console.log(`  ✅ ${lookup.objectName}: ${new Set(values).size} unique values from ${orgRecords.length} records`);
+                } catch (error) {
+                    console.warn(`  ⚠️  Query failed for ${lookup.objectName}: ${error.message}`);
+                }
+            }
+
+            if (allValues.size === 0) {
+                console.log(`  ⏭️  ${obj.objectName}: no reference values found`);
+                continue;
+            }
+
+            // Build clean object config with filtered WHERE
+            const clean = {};
+            for (const [key, value] of Object.entries(obj)) {
+                if (!key.startsWith('_')) {
+                    clean[key] = value;
+                }
+            }
+
+            const selectFrom = obj.query.split(/\s+WHERE\s+|\s+ORDER\s+BY\s+/i)[0];
+            const orderByMatch = obj.query.match(/\bORDER\s+BY\s+(.+)$/i);
+            const orderBy = orderByMatch ? ` ORDER BY ${orderByMatch[1]}` : '';
+
+            const idsString = [...allValues].map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
+            clean.query = `${selectFrom} WHERE ${obj.externalId} IN (${idsString})${orderBy}`;
+            clean.master = true;
+
+            afterRefObjects.push(clean);
+            console.log(`  🔗 ${obj.objectName}: enriched with ${allValues.size} reference values`);
+        }
+
+        if (afterRefObjects.length === 0) return;
+
+        // Build export config, replacing after-reference objects with enriched versions
+        const fullExport = JSON.parse(JSON.stringify(this.config.exportJson));
+        for (const afterObj of afterRefObjects) {
+            const idx = fullExport.objects.findIndex((o) => o.objectName === afterObj.objectName);
+            if (idx >= 0) {
+                fullExport.objects[idx] = afterObj;
+            } else {
+                fullExport.objects.push(afterObj);
+            }
+        }
+
+        const exportPath = path.join(targetDir, EXPORT_JSON);
+        this._verboseLog('After-reference export configuration', fullExport);
+        await fs.writeJson(exportPath, fullExport, { spaces: 2 });
+
+        await this.sfdmuManager.run(targetDir);
+        console.log(`✅ After-reference export completed`);
     }
 
     /**
@@ -478,43 +594,31 @@ class DataManager {
             const filterClauses = [];
 
             for (const junction of obj._junction) {
-                // Read source object's CSV to get exported values
+                // Look up parent object's externalId from config
+                const parentObj = this.config.getObject(junction.objectName);
+                if (!parentObj) {
+                    console.warn(`  ⚠️  Parent object ${junction.objectName} not found in config`);
+                    continue;
+                }
+
+                // Read parent object's CSV to get exported values
                 const csvPath = path.join(targetDir, junction.objectName + CSV_EXTENSION);
                 const records = await this.csvManager.readCsvRecords(csvPath);
 
                 if (records.length === 0) {
-                    console.warn(`  ⚠️  No CSV records for ${junction.objectName}`);
+                    console.warn(`  ⚠️  No CSV records for parent ${junction.objectName}`);
                     continue;
                 }
 
-                if (junction.column) {
-                    // Column mode: read specific column from source CSV, filter by this object's externalId
-                    const values = [...new Set(
-                        records.map((r) => r[junction.column]).filter((v) => v && v !== '#N/A')
-                    )];
+                // Collect unique parent values using the parent's externalId
+                const values = [...new Set(
+                    records.map((r) => r[parentObj.externalId]).filter(Boolean)
+                )];
 
-                    if (values.length > 0) {
-                        const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
-                        filterClauses.push(`${obj.externalId} IN (${idsString})`);
-                        console.log(`  📊 ${obj.objectName}: ${values.length} values from ${junction.objectName}.${junction.column}`);
-                    }
-                } else {
-                    // Standard junction: read parent's externalId, filter by junction lookup field
-                    const parentObj = this.config.getObject(junction.objectName);
-                    if (!parentObj) {
-                        console.warn(`  ⚠️  Parent object ${junction.objectName} not found in config`);
-                        continue;
-                    }
-
-                    const values = [...new Set(
-                        records.map((r) => r[parentObj.externalId]).filter(Boolean)
-                    )];
-
-                    if (values.length > 0) {
-                        const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
-                        filterClauses.push(`${junction.lookup} IN (${idsString})`);
-                        console.log(`  📊 ${obj.objectName}: ${values.length} ${junction.objectName} values for ${junction.lookup}`);
-                    }
+                if (values.length > 0) {
+                    const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
+                    filterClauses.push(`${junction.lookup} IN (${idsString})`);
+                    console.log(`  📊 ${obj.objectName}: ${values.length} ${junction.objectName} values for ${junction.lookup}`);
                 }
             }
 
@@ -544,9 +648,16 @@ class DataManager {
 
         if (junctionExportObjects.length === 0) return;
 
-        // Add junction objects to the full export config (SFDMU needs all objects for resolution)
+        // Build export config, replacing junction objects with filtered versions
         const fullExport = JSON.parse(JSON.stringify(this.config.exportJson));
-        fullExport.objects.push(...junctionExportObjects);
+        for (const junctionObj of junctionExportObjects) {
+            const idx = fullExport.objects.findIndex((o) => o.objectName === junctionObj.objectName);
+            if (idx >= 0) {
+                fullExport.objects[idx] = junctionObj;
+            } else {
+                fullExport.objects.push(junctionObj);
+            }
+        }
 
         const exportPath = path.join(targetDir, EXPORT_JSON);
         this._verboseLog('Junction export configuration', fullExport);
