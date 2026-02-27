@@ -148,12 +148,13 @@ class Config {
             obj.query = this._substituteQuery(obj.query, obj._salesOrgObject);
         }
 
-        // Apply runtime flags
-        const result = {
-            excludeIdsFromCSVFiles: config.excludeIdsFromCSVFiles,
-            promptOnIssuesInCSVFiles: config.promptOnIssuesInCSVFiles,
-            promptOnMissingParentObjects: config.promptOnMissingParentObjects,
-        };
+        // Pass through top-level SFDMU flags (strip _-prefixed metadata)
+        const result = {};
+        for (const [key, value] of Object.entries(config)) {
+            if (!key.startsWith('_') && key !== 'objects') {
+                result[key] = value;
+            }
+        }
 
         if (this.simulation) {
             result.simulationMode = true;
