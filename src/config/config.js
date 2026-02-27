@@ -3,13 +3,11 @@ const fs = require('fs-extra');
 const { OPERATIONS, LOG_LEVELS, SALES_ORGS_SLUG } = require('./constants');
 
 const CSV_FILE = 'csvfile';
-const ADDON_BASE = path.resolve(__dirname, '../addons');
 
 class Config {
     constructor(operation, options) {
         this.operation = operation;
         this.needTemporaryImport = false;
-        this.madeTemporaryImport = false;
 
         if (!Object.values(OPERATIONS).includes(this.operation)) {
             throw new Error(`Invalid operation: ${this.operation}. Must be one of: ${Object.values(OPERATIONS).join(', ')}`);
@@ -128,7 +126,7 @@ class Config {
 
     /**
      * Build the SFDMU export.json from raw config.
-     * Deep-clones, filters, substitutes, builds addons, strips _ properties.
+     * Deep-clones, filters, substitutes, strips _ properties.
      */
     _buildExportJson() {
         const config = JSON.parse(JSON.stringify(this._rawConfig));
@@ -169,19 +167,6 @@ class Config {
         if (this.deleteOldData) {
             for (const obj of objects) {
                 obj.deleteOldData = true;
-            }
-        }
-
-        // Build addon manifests before stripping _ properties
-        const addons = this._buildAddons(objects);
-        if (addons.beforeAddons) {
-            result.beforeAddons = addons.beforeAddons;
-        }
-
-        // Apply per-object afterUpdateAddons
-        for (const obj of objects) {
-            if (addons.objectAddons[obj.objectName]) {
-                obj.afterUpdateAddons = addons.objectAddons[obj.objectName];
             }
         }
 
@@ -227,35 +212,6 @@ class Config {
         return query.replace(/ WHERE .+?(?= ORDER BY )/i, '');
     }
 
-    /**
-     * Build SFDMU addon manifests from _ metadata.
-     * _hierarchy entries become hierarchy-resolver addons on import.
-     */
-    _buildAddons(objects) {
-        const result = { objectAddons: {} };
-
-        // Hierarchy resolver (import only, non-simulation)
-        // _hierarchy entries specify self-referencing lookup fields that need
-        // post-import resolution by querying the target org
-        if (this.isImport && !this.simulation) {
-            for (const obj of objects) {
-                if (!obj._hierarchy) continue;
-
-                result.objectAddons[obj.objectName] = obj._hierarchy.map((r) => ({
-                    path: path.join(ADDON_BASE, 'hierarchy-resolver.mjs'),
-                    description: `Resolve self-lookup hierarchy for ${obj.objectName}`,
-                    excluded: false,
-                    args: {
-                        childField: obj.externalId,
-                        parentField: r.fieldName,
-                        parentIdField: r.fieldName.replace(/__r\..+$/, '__c'),
-                    },
-                }));
-            }
-        }
-
-        return result;
-    }
 
     /**
      * Objects with _reference metadata (pre-export: enrich WHERE clauses).
@@ -279,7 +235,7 @@ class Config {
     }
 
     /**
-     * Objects with _hierarchy metadata (import: hierarchy-resolver addon; export: #N/A resolution).
+     * Objects with _hierarchy metadata (import: hierarchy resolution; export: #N/A resolution).
      */
     get hierarchyObjects() {
         return this._rawConfig.objects.filter((o) => o._hierarchy);

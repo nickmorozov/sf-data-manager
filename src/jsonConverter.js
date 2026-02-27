@@ -192,15 +192,13 @@ class JsonConverter {
                 const jsonPath = path.join(jsonDir, file);
                 const record = await fs.readJson(jsonPath);
 
-                // Force temporary values on first import (e.g. pushable=false)
-                if (!this.config.madeTemporaryImport) {
-                    const meta = this.config.getObjectMeta(objectName);
-
-                    for (const [fieldName, temporaryValue] of Object.entries(meta?._temporaryValues || {})) {
-                        if (record.hasOwnProperty(fieldName) && record[fieldName] !== temporaryValue) {
-                            record[fieldName] = temporaryValue;
-                            this.config.needTemporaryImport = true;
-                        }
+                // Force temporary values on import (e.g. pushable=false)
+                // Real values are restored after SFDMU completes via restoreTemporaryValues()
+                const meta = this.config.getObjectMeta(objectName);
+                for (const [fieldName, temporaryValue] of Object.entries(meta?._temporaryValues || {})) {
+                    if (record.hasOwnProperty(fieldName) && record[fieldName] !== temporaryValue) {
+                        record[fieldName] = temporaryValue;
+                        this.config.needTemporaryImport = true;
                     }
                 }
 

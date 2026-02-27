@@ -48,7 +48,7 @@ Commander.js CLI. Parses args, creates `Config`, creates `DataManager`, runs `in
 
 **Config** — `src/config/`
 
-- `config.js` — `Config` class. Loads JSON config from consumer project's `config/<operation>.json`, validates CLI options, resolves paths, builds SFDMU `export.json` with `_`-prefixed metadata stripped. Getters expose filtered object lists: `referenceObjects`, `lookupObjects`, `junctionObjects`, `hierarchyObjects`. Builds hierarchy-resolver addon manifests on import.
+- `config.js` — `Config` class. Loads JSON config from consumer project's `config/<operation>.json`, validates CLI options, resolves paths, builds SFDMU `export.json` with `_`-prefixed metadata stripped. Getters expose filtered object lists: `referenceObjects`, `lookupObjects`, `junctionObjects`, `hierarchyObjects`.
 - `constants.js` — Shared constants: `OPERATIONS`, `LOG_LEVELS`, `DEFAULT_TIMEOUT` (300s), placeholder slugs.
 
 **Core** — `src/`
@@ -66,7 +66,7 @@ Commander.js CLI. Parses args, creates `Config`, creates `DataManager`, runs `in
 
 **Sales org partitioning is optional.** If the YAML has a `salesOrg` section, data is split into subdirectories per org and processed sequentially. If absent, everything goes into a single flat directory. Many code paths branch on `config.hasSalesOrgs`.
 
-**Two-step import.** Objects with `temporaryValues` get imported twice: first with placeholder values (to satisfy required lookups), then again with real values. Tracked via `config.needTemporaryImport` / `config.madeTemporaryImport`.
+**Temporary values.** Objects with `_temporaryValues` have fields overridden during CSV generation (e.g., `Is_Pushable__c = false` to prevent CG Cloud triggers). After the single SFDMU run completes, `restoreTemporaryValues()` queries the target org and updates each record to its real value via the API.
 
 **Export pipeline.** Pre-processing enriches queries, then one or two SFDMU runs, then post-processing:
 1. `_reference` — Query org for objects referencing this one, enrich WHERE with their values (OR'd with original)
@@ -78,11 +78,8 @@ Commander.js CLI. Parses args, creates `Config`, creates `DataManager`, runs `in
 **Import pipeline.** Single SFDMU run with hierarchy resolution:
 1. JSON → CSV conversion
 2. SFDMU run (upserts all records, self-referencing lookups left NULL)
-3. `_hierarchy` addon fires per-object: reads CSV for child→parent mapping, queries target org for IDs, DML updates self-lookups
+3. `resolveHierarchies()` — reads CSV for child→parent mapping, queries target org for IDs, updates self-referencing lookups via API
 
-**SFDMU add-ons** (`src/addons/`):
-- `union-resolver.mjs` — Script-level `beforeAddons` hook (export). Queries source org for parent field values, rewrites WHERE clauses with flat `IN (...)` lists for objects using subselect-based filters.
-- `hierarchy-resolver.mjs` — Per-object `afterUpdateAddons` hook (import). Reads CSV for child→parent mapping, queries target org for record IDs, updates self-referencing lookup fields via DML.
 
 ### JSON Config Schema
 
@@ -95,13 +92,13 @@ Consumer projects provide `config/<operation>.json` (e.g., `config/export.json`)
   - `_reference` — `[{ objectName, fieldName }]`: pre-export WHERE enrichment from referencing objects
   - `_junction` — `[{ objectName, lookup }]`: post-first-run WHERE enrichment from parent CSVs
   - `_lookup` — `[{ objectName, fieldName }]`: post-export `#N/A` resolution by querying source org
-  - `_hierarchy` — `[{ fieldName }]`: post-export `#N/A` resolution + import hierarchy-resolver addon
+  - `_hierarchy` — `[{ fieldName }]`: post-export `#N/A` resolution + post-import self-referencing lookup resolution
   - `_slim` — Include in slim imports
   - `_salesOrgObject` — Marks the sales org object itself
 
 ## Conventions
 
-- CommonJS (`require`/`module.exports`) for all wrapper code; ESM (`.mjs`) for SFDMU add-ons (required by SFDMU's module loader)
+- CommonJS (`require`/`module.exports`) throughout
 - Classes exported as `{ ClassName }` objects
 - Console logging with emoji prefixes for status (✅ ❌ ⚠️ 🎉 💥 etc.)
 - `config` object passed through constructors to all managers

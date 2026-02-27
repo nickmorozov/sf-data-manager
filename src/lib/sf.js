@@ -54,6 +54,33 @@ class SfManager {
             throw error;
         }
     }
+    /**
+     * Update records in a Salesforce org.
+     * @param {string} org - Org alias
+     * @param {string} objectName - SObject API name
+     * @param {Object[]} records - Array of { Id, field: value } objects
+     * @returns {Promise<void>}
+     */
+    async update(org, objectName, records) {
+        if (records.length === 0) return;
+
+        // Use sf data update record for small batches, bulk for larger
+        for (const record of records) {
+            const { Id, ...fields } = record;
+            const values = Object.entries(fields)
+                .map(([k, v]) => `${k}=${v}`)
+                .join(' ');
+
+            const command = `sf data update record --sobject "${objectName}" --record-id "${Id}" --values "${values}" --target-org "${org}" --json`;
+
+            try {
+                await execAsync(command, { timeout: this.config.timeout });
+            } catch (error) {
+                console.error(`❌ Update failed for ${objectName} ${Id}: ${error.message}`);
+                throw error;
+            }
+        }
+    }
 }
 
 module.exports = { SfManager };

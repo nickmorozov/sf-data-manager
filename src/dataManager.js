@@ -203,15 +203,17 @@ class DataManager {
             await fs.writeJson(exportPath, this.config.exportJson, { spaces: 2 });
             console.log(`📄 Configuration written to: ${exportPath}`);
 
-            // Handle two-step import if needed
-            if (this.config.isImport && this.config.needTemporaryImport) {
-                console.log(`First import with temporary values...`);
-                await this.sfdmuManager.run(targetDir);
-                await this.jsonConverter.jsonToCsv();
-                console.log(`Second import with correct values...`);
-            }
-
             await this.sfdmuManager.run(targetDir);
+
+            // Post-import: resolve hierarchies and restore temporary values
+            if (this.config.isImport && !this.config.simulation) {
+                if (this.config.hierarchyObjects.length > 0) {
+                    await this.resolveHierarchies();
+                }
+                if (this.config.needTemporaryImport) {
+                    await this.restoreTemporaryValues();
+                }
+            }
 
             // Post-first-export: filter and export junction objects in a second SFDMU run
             if (this.config.isExport && this.config.junctionObjects.length > 0) {
@@ -308,6 +310,144 @@ class DataManager {
     }
 
     /**
+     * Post-import: restore temporary field values to their real values.
+     *
+     * During CSV generation, _temporaryValues overrides fields (e.g., Is_Pushable__c = false)
+     * to prevent CG Cloud from triggering downstream processes during upsert.
+     * After SFDMU completes, this queries for the affected records and sets the real values.
+     */
+    async restoreTemporaryValues() {
+        console.log(`\n🔄 Restoring temporary values...`);
+
+        for (const obj of this.config.exportJson.objects) {
+            const meta = this.config.getObjectMeta(obj.objectName);
+            const temporaryValues = meta?._temporaryValues;
+            if (!temporaryValues) continue;
+
+            // Query target org for records that need updating
+            const fields = Object.keys(temporaryValues);
+            const soql = `SELECT Id, ${obj.externalId}, ${fields.join(', ')} FROM ${obj.objectName}`;
+
+            try {
+                const records = await this.sfManager.query(this.config.target, soql);
+                const csvPath = path.join(this.config.tmpDir, this.config.targetOrg || '', obj.objectName + CSV_EXTENSION);
+                const csvRecords = await this.csvManager.readCsvRecords(csvPath);
+
+                // Build externalId → real values map from the original JSON data
+                const realValues = new Map();
+                for (const csvRecord of csvRecords) {
+                    const key = csvRecord[obj.externalId];
+                    if (!key) continue;
+                    const values = {};
+                    for (const field of fields) {
+                        if (csvRecord[field] !== undefined && csvRecord[field] !== temporaryValues[field]) {
+                            values[field] = csvRecord[field];
+                        }
+                    }
+                    if (Object.keys(values).length > 0) {
+                        realValues.set(key, values);
+                    }
+                }
+
+                // Match org records by externalId and build updates
+                const updates = [];
+                for (const record of records) {
+                    const key = record[obj.externalId];
+                    const real = realValues.get(key);
+                    if (real) {
+                        updates.push({ Id: record.Id, ...real });
+                    }
+                }
+
+                if (updates.length > 0) {
+                    console.log(`  📊 ${obj.objectName}: restoring ${updates.length} records`);
+                    await this.sfManager.update(this.config.target, obj.objectName, updates);
+                    console.log(`  ✅ ${obj.objectName}: restored`);
+                } else {
+                    console.log(`  ✅ ${obj.objectName}: no temporary values to restore`);
+                }
+            } catch (error) {
+                console.warn(`  ⚠️  Failed to restore temporary values for ${obj.objectName}: ${error.message}`);
+            }
+        }
+    }
+
+    /**
+     * Post-import: resolve self-referencing hierarchy lookups.
+     *
+     * SFDMU can't set self-referencing lookups during upsert (chicken-and-egg:
+     * parent must exist before child can reference it). It leaves them NULL.
+     * This reads the CSV for child→parent mapping, queries the target org for
+     * real IDs, and updates the lookup fields.
+     */
+    async resolveHierarchies() {
+        console.log(`\n🔗 Resolving hierarchies...`);
+
+        for (const obj of this.config.hierarchyObjects) {
+            const externalId = obj.externalId;
+
+            for (const hierarchy of obj._hierarchy) {
+                const parentField = hierarchy.fieldName; // e.g. "cgcloud__Parent__r.Name"
+                const parentIdField = parentField.replace(/__r\..+$/, '__c'); // e.g. "cgcloud__Parent__c"
+
+                // Read CSV to build child→parent external ID mapping
+                const csvPath = path.join(this.config.tmpDir, this.config.targetOrg || '', obj.objectName + CSV_EXTENSION);
+                const records = await this.csvManager.readCsvRecords(csvPath);
+
+                const childParentMap = new Map();
+                for (const record of records) {
+                    const childId = (record[externalId] || '').trim();
+                    const parentId = (record[parentField] || '').trim();
+                    if (childId && parentId && childId !== parentId) {
+                        childParentMap.set(childId, parentId);
+                    }
+                }
+
+                if (childParentMap.size === 0) {
+                    console.log(`  ✅ ${obj.objectName}.${parentField}: no hierarchies`);
+                    continue;
+                }
+
+                // Query target org for real Salesforce IDs
+                const allExtIds = [...new Set([...childParentMap.keys(), ...childParentMap.values()])];
+                const escape = (v) => v.replace(/'/g, "\\'");
+                const idsString = allExtIds.map((v) => `'${escape(v)}'`).join(', ');
+                const soql = `SELECT Id, ${externalId} FROM ${obj.objectName} WHERE ${externalId} IN (${idsString})`;
+
+                try {
+                    const orgRecords = await this.sfManager.query(this.config.target, soql);
+
+                    // Build externalId → real Id map
+                    const extIdToRealId = new Map();
+                    for (const r of orgRecords) {
+                        extIdToRealId.set(r[externalId], r.Id);
+                    }
+
+                    // Build updates
+                    const updates = [];
+                    for (const [childExtId, parentExtId] of childParentMap) {
+                        const childRealId = extIdToRealId.get(childExtId);
+                        const parentRealId = extIdToRealId.get(parentExtId);
+                        if (childRealId && parentRealId) {
+                            updates.push({ Id: childRealId, [parentIdField]: parentRealId });
+                        }
+                    }
+
+                    if (updates.length > 0) {
+                        console.log(`  📊 ${obj.objectName}.${parentField}: updating ${updates.length} records`);
+                        await this.sfManager.update(this.config.target, obj.objectName, updates);
+                        console.log(`  ✅ ${obj.objectName}.${parentField}: resolved`);
+                    } else {
+                        console.log(`  ✅ ${obj.objectName}.${parentField}: no updates needed`);
+                    }
+                } catch (error) {
+                    console.warn(`  ⚠️  Failed to resolve hierarchy for ${obj.objectName}.${parentField}: ${error.message}`);
+                }
+            }
+        }
+    }
+
+    /**
      * Post-first-export: export junction objects with filtered WHERE clauses.
      *
      * Junction objects (e.g., KPI_Set_KPI_Definition) connect two parent objects.
@@ -400,8 +540,8 @@ class DataManager {
      * Processes both _lookup and _hierarchy entries. Any relationship field
      * with #N/A in the CSV is queried from the source org and patched.
      *
-     * This gives SFDMU and the hierarchy-resolver addon the real values they need
-     * during import (e.g., Parent__r.Name = 'ActualRecord' instead of '#N/A').
+     * This gives SFDMU the real values it needs during import
+     * (e.g., Parent__r.Name = 'ActualRecord' instead of '#N/A').
      */
     async resolveAfterLookups(targetDir) {
         // Collect objects that need #N/A resolution (from _lookup or _hierarchy)
