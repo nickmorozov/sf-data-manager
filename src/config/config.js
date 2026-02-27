@@ -1,6 +1,6 @@
 const { ExportJson } = require('./exportJson');
 const { OPERATIONS, LOG_LEVELS } = require('./constants');
-const { loadProjectConfig } = require('../src/configLoader');
+const { loadProjectConfig } = require('./configLoader');
 const path = require('path');
 const fs = require('fs-extra');
 

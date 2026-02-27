@@ -1,7 +1,7 @@
 const yaml = require('js-yaml');
 const fs = require('fs');
 const path = require('path');
-const { DATA_DIR, TMP_DIR } = require('../config/constants');
+const { DATA_DIR, TMP_DIR } = require('./constants');
 
 /**
  * Load and merge project configuration from all YAML files in the consumer project's config/ directory.

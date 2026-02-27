@@ -4,7 +4,7 @@ require('dotenv').config({ override: true });
 
 const { program } = require('commander');
 
-const { DataManager } = require('./src/dataManager');
+const { DataManager } = require('./dataManager');
 const { Config } = require('./config/config');
 
 const { OPERATIONS, DEFAULT_TIMEOUT, LOG_LEVELS } = require('./config/constants');

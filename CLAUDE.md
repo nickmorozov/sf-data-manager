@@ -13,9 +13,9 @@ This repo is designed to be used as a **git submodule** in consumer projects. It
 From the consumer project root:
 
 ```bash
-node sf-data-manager/main.js export -s <source-org> --source-orgs 0001,0002 --verbose
-node sf-data-manager/main.js import -t <target-org> --source-orgs 0001
-node sf-data-manager/main.js list -s <source-org>
+node sf-data-manager/src/main.js export -s <source-org> --source-orgs 0001,0002 --verbose
+node sf-data-manager/src/main.js import -t <target-org> --source-orgs 0001
+node sf-data-manager/src/main.js list -s <source-org>
 ```
 
 Options also accept env vars: `SOURCE_ALIAS`, `TARGET_ALIAS`, `SOURCE_SALES_ORGS`, `TARGET_SALES_ORGS` (loaded via dotenv).
@@ -39,29 +39,31 @@ Import: JSON (data/) → CSV (tmp/) → SFDMU → Salesforce Org
 
 The JSON layer exists so exported data can be version-controlled (one file per record, named by external ID).
 
-### Layer Responsibilities
+### Source Layout (`src/`)
 
-**CLI Layer** — `main.js`
-Commander.js entry point. Parses args, creates `Config`, creates `DataManager`, runs `init()` then `processData()`.
+All source code lives under `src/`. Root contains only `package.json`, docs, and license.
 
-**Config Layer** — `config/`
+**Entry Point** — `src/main.js`
+Commander.js CLI. Parses args, creates `Config`, creates `DataManager`, runs `init()` then `processData()`.
+
+**Config** — `src/config/`
 
 - `config.js` — `Config` class. Loads YAML via `configLoader`, validates options, resolves paths, creates `ExportJson`. Getters expose filtered object lists: `allObjects`, `slimObjects`, `junctionObjects`, `hierarchyObjects`.
-- `configLoader.js` — Finds first `.yaml`/`.yml` in consumer's `config/` dir and parses it.
-- `exportJson.js` — Builds the SFDMU `export.json` structure from object definitions.
+- `configLoader.js` — Finds and merges `.yaml`/`.yml` files in consumer's `config/` dir.
+- `exportJson.js` — Builds the SFDMU `export.json` structure. Emits add-on manifests: script-level `beforeAddons` for union resolution (export), per-object `afterUpdateAddons` for hierarchy repair (import).
 - `objectConfig.js` — Generates per-object SFDMU config: SOQL queries, WHERE/ORDER BY clauses, placeholder substitution (`${SALES_ORGS}`, `${PARENT_IDS}`).
 - `constants.js` — Shared constants: `OPERATIONS`, `LOG_LEVELS`, `DEFAULT_TIMEOUT` (300s), placeholder slugs.
 
-**Core Logic** — `src/`
+**Core** — `src/`
 
-- `dataManager.js` — Orchestrator. Routes to single or multi-sales-org transfer. Handles junction exports, self-lookup Apex updates, two-step temporary-value imports, and post-operation error analysis.
+- `dataManager.js` — Orchestrator. Routes to single or multi-sales-org transfer. Handles junction exports, two-step temporary-value imports, and post-operation error analysis.
 - `csvManager.js` — CSV parsing (with BOM support via `csv-parse`). Extracts sales orgs, parent IDs, hierarchy mappings. Analyzes SFDMU error reports (`CSVIssuesReport.csv`, `MissingParentRecordsReport.csv`).
 - `jsonConverter.js` — Bidirectional CSV↔JSON. Each record becomes a separate JSON file named by external ID. Handles compound IDs (semicolon-separated), sales org field remapping, filename sanitization, and manual CSV quoting.
 
-**External Wrappers** — `lib/`
+**CLI Wrappers** — `src/lib/`
 
 - `sfdmu.js` — Spawns `sf sfdmu run` as subprocess with timeout, real-time stdout streaming in verbose mode.
-- `sf.js` — Salesforce CLI queries and Apex execution. Generates Apex from `templates/updateSelfLookups.apex` for self-referencing hierarchies.
+- `sf.js` — Salesforce CLI queries (`sf data query`) for sales org discovery and general SOQL.
 
 ### Key Patterns
 
@@ -71,7 +73,9 @@ Commander.js entry point. Parses args, creates `Config`, creates `DataManager`, 
 
 **Junction record export.** Junction objects need a secondary SFDMU run with a dynamically-built WHERE clause (replacing `${PARENT_IDS}` with actual IDs extracted from the first export's CSV). Shared parent object CSVs are backed up and merged after.
 
-**Self-referencing hierarchies.** After import, objects with `hierarchy` config get an Apex script generated from `templates/updateSelfLookups.apex` and executed via `sf apex run` to rebuild parent-child relationships.
+**SFDMU add-ons** (`src/addons/`). Two native SFDMU add-ons handle processing that was previously done by the wrapper:
+- `union-resolver.mjs` — Script-level `beforeAddons` hook (export). Queries source org for parent field values, collects IDs from all union parents, rewrites WHERE clauses with flat `IN (...)` lists. Eliminates semi-join subselects that SOQL can't combine with OR.
+- `hierarchy-resolver.mjs` — Per-object `afterUpdateAddons` hook (import). Reads CSV for child→parent mapping, queries target org for record IDs, updates self-referencing lookup fields via DML. Replaces the previous Apex-based approach.
 
 ### YAML Config Schema
 
@@ -85,7 +89,7 @@ Consumer projects provide `config/<name>.yaml`:
 
 ## Conventions
 
-- CommonJS (`require`/`module.exports`) throughout, no ESM
+- CommonJS (`require`/`module.exports`) for all wrapper code; ESM (`.mjs`) for SFDMU add-ons (required by SFDMU's module loader)
 - Classes exported as `{ ClassName }` objects
 - Console logging with emoji prefixes for status (✅ ❌ ⚠️ 🎉 💥 etc.)
 - `config` object passed through constructors to all managers

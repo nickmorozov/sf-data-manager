@@ -3,26 +3,12 @@ const path = require('path');
 
 const { CsvManager } = require('./csvManager');
 const { JsonConverter } = require('./jsonConverter');
-const { SfdmuManager } = require('./../lib/sfdmu');
-const { SfManager } = require('./../lib/sf');
+const { SfdmuManager } = require('./lib/sfdmu');
+const { SfManager } = require('./lib/sf');
 
-const { LINE_REPEAT, PARENT_IDS_SLUG, CSV_EXTENSION } = require('./../config/constants');
+const { LINE_REPEAT, PARENT_IDS_SLUG, CSV_EXTENSION } = require('./config/constants');
 
 const EXPORT_JSON = 'export.json';
-
-/**
- * Navigate a nested SOQL result object by dot-separated field path.
- * e.g., getNestedValue(record, 'cgcloud__KPI_Set__r.Name') → record.cgcloud__KPI_Set__r.Name
- */
-function getNestedValue(record, fieldPath) {
-    const parts = fieldPath.split('.');
-    let current = record;
-    for (const part of parts) {
-        if (current == null) return null;
-        current = current[part];
-    }
-    return current;
-}
 
 class DataManager {
     constructor(config) {
@@ -230,15 +216,10 @@ class DataManager {
 
             await fs.ensureDir(targetDir);
 
-            // Pre-export: resolve unions by querying org for parent IDs, expanding WHERE clauses
-            if (this.config.isExport) {
-                await this.resolveUnions();
-            }
-
             const exportPath = path.join(targetDir, EXPORT_JSON);
 
             // Write temporary config file
-            await fs.writeJson(exportPath, this.config.exportJson, { spaces: 4 });
+            await fs.writeJson(exportPath, this.config.exportJson, { spaces: 2 });
             console.log(`📄 Configuration written to: ${exportPath}`);
 
             // Handle two-step import if needed
@@ -258,111 +239,10 @@ class DataManager {
             if (this.config.isExport && this.config.junctionObjects.length > 0) {
                 await this.exportExtraJunctions(targetDir);
             }
-
-            // Update self-referencing lookups if needed
-            if (this.config.isImport && this.config.hierarchyObjects.length > 0 && !this.config.simulation) {
-                await this.updateSelfLookups(targetDir);
-            }
         } catch (error) {
             const totalTime = (Date.now() - startTime) / 1000;
             console.error(`❌ transferData failed after ${totalTime}s: ${error.message}`);
             throw error;
-        }
-    }
-
-    /**
-     * Pre-export: query the org for union parent field values and expand WHERE clauses.
-     * This runs BEFORE the main SFDMU pass so that referenced records (e.g. KPI_Sets
-     * used by Account_Template or RTR_Report_Configuration) are included in the export
-     * from the start. SFDMU then resolves all relationship lookups naturally.
-     */
-    async resolveUnions() {
-        if (this.config.unionObjects.length === 0) return;
-
-        console.log(`\n🔗 Resolving union dependencies...`);
-        const sourceOrg = this.config.source;
-
-        for (const objectConfig of this.config.unionObjects) {
-            const unions = Array.isArray(objectConfig.union) ? objectConfig.union : [objectConfig.union];
-            const allParentIds = new Set();
-
-            for (const unionConfig of unions) {
-                // Find the parent object's export config to extract its resolved WHERE clause
-                const parentExportObj = this.config.exportJson.objects.find(
-                    (obj) => obj.objectName === unionConfig.parent.objectName
-                );
-
-                if (!parentExportObj) {
-                    console.warn(`  ⚠️ Export config for ${unionConfig.parent.objectName} not found, skipping`);
-                    continue;
-                }
-
-                // Build a SOQL query for the parent's lookup field, reusing its WHERE clause
-                const field = unionConfig.parent.field;
-                const whereMatch = parentExportObj.query.match(/ WHERE (.+?)(?= ORDER BY )/i);
-
-                let query = `SELECT ${field} FROM ${unionConfig.parent.objectName}`;
-                if (whereMatch) query += ` WHERE ${whereMatch[1]}`;
-
-                console.log(`  🔍 Querying ${unionConfig.parent.objectName} for ${field}...`);
-
-                const records = await this.sfManager.query(sourceOrg, query);
-
-                for (const record of records) {
-                    const value = getNestedValue(record, field);
-                    if (value) allParentIds.add(value);
-                }
-            }
-
-            // Also resolve the object's own WHERE clause to flat IDs
-            // (SOQL forbids combining semi-join subselects with OR)
-            const exportObject = this.config.exportJson.objects.find((obj) => obj.objectName === objectConfig.objectName);
-
-            if (exportObject) {
-                const origWhereMatch = exportObject.query.match(/ WHERE (.+?)(?= ORDER BY )/i);
-                if (origWhereMatch) {
-                    const externalId = objectConfig.externalId;
-                    const origQuery = `SELECT ${externalId} FROM ${objectConfig.objectName} WHERE ${origWhereMatch[1]}`;
-                    console.log(`  🔍 Resolving original ${objectConfig.objectName} WHERE to flat IDs...`);
-                    const origRecords = await this.sfManager.query(sourceOrg, origQuery);
-                    for (const record of origRecords) {
-                        const value = record[externalId];
-                        if (value) allParentIds.add(value);
-                    }
-                }
-            }
-
-            if (allParentIds.size === 0) {
-                console.log(`  ⚠️ No union parent IDs for ${objectConfig.objectName}, skipping`);
-                continue;
-            }
-
-            console.log(`  📊 Found ${allParentIds.size} combined IDs for ${objectConfig.objectName}: ${Array.from(allParentIds).join(', ')}`);
-
-            // Build a single flat WHERE with ALL IDs (original + union) — no semi-joins
-            const idsString = Array.from(allParentIds)
-                .map((id) => `'${id.replace(/'/g, "\\'")}'`)
-                .join(', ');
-            const flatWhere = unions[0].where.replace(PARENT_IDS_SLUG, idsString);
-
-            // Replace the entire WHERE clause with the flat one
-            if (exportObject) {
-                const whereMatch = exportObject.query.match(/^(.+? WHERE )(.+)( ORDER BY .+)$/i);
-
-                if (whereMatch) {
-                    exportObject.query = `${whereMatch[1]}${flatWhere}${whereMatch[3]}`;
-                } else {
-                    const orderByMatch = exportObject.query.match(/^(.+?)( ORDER BY .+)$/i);
-                    if (orderByMatch) {
-                        exportObject.query = `${orderByMatch[1]} WHERE ${flatWhere}${orderByMatch[2]}`;
-                    }
-                }
-
-                console.log(`  ✅ Replaced ${objectConfig.objectName} WHERE with flat IDs`);
-                if (this.config.verbose) {
-                    console.log(`  📝 Query: ${exportObject.query}`);
-                }
-            }
         }
     }
 
@@ -401,7 +281,7 @@ class DataManager {
                 // Create custom export configuration for junction records
                 let junctionObject = this.config.exportJson.objects.find((objectConfig) => objectConfig.objectName === junctionConfig.objectName);
                 // Build junction query: replace any existing WHERE with the junction WHERE
-                const [selectFrom] = junctionObject.query.split(/ WHERE /i);
+                const [selectFrom] = junctionObject.query.split(/ WHERE|ORDER BY /i);
                 const orderBy = junctionObject.query.split(/ ORDER BY /i).pop();
                 objects.push({
                     ...junctionObject,
@@ -463,7 +343,7 @@ class DataManager {
 
             // Write the export configuration
             const exportPath = path.join(targetDir, EXPORT_JSON);
-            await fs.writeJson(exportPath, junctionExportJson, { spaces: 4 });
+            await fs.writeJson(exportPath, junctionExportJson, { spaces: 2 });
 
             // Run SFDMU export for KPI Set definitions
             await this.sfdmuManager.run(targetDir);
@@ -512,23 +392,6 @@ class DataManager {
             }
 
             await this.jsonConverter.writeRecordsToCsv(mergedRecords, csvPath);
-        }
-    }
-
-    async updateSelfLookups(targetDir) {
-        console.log(`\n🚀 Running Apex script to set parent names for self-referencing objects...`);
-
-        for (const objectConfig of this.config.hierarchyObjects) {
-            const hierarchies = Array.isArray(objectConfig.hierarchy) ? objectConfig.hierarchy : [objectConfig.hierarchy];
-
-            for (const hierarchy of hierarchies) {
-                // Build a temporary config view with the specific hierarchy for this iteration
-                const hierarchyConfig = { ...objectConfig, hierarchy };
-
-                const childParentMapping = await this.csvManager.getChildParentMapping(targetDir, hierarchyConfig);
-                const apexPath = await this.sfManager.generateSelfLookupsScript(targetDir, hierarchyConfig, childParentMapping);
-                await this.sfManager.runApex(apexPath);
-            }
         }
     }
 

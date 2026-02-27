@@ -2,9 +2,9 @@
     "name": "data-tool",
     "version": "1.0.0",
     "description": "TPM Data Management Tool",
-    "main": "main.js",
+    "main": "src/main.js",
     "bin": {
-        "data": "./main.js"
+        "data": "./src/main.js"
     },
     "dependencies": {
         "commander": "^14.0.3",

@@ -2,10 +2,11 @@ const fs = require('fs-extra');
 const path = require('path');
 const { parse } = require('csv-parse');
 
-const { CSV_EXTENSION } = require('../config/constants');
+const { CSV_EXTENSION } = require('./config/constants');
 const JSON_EXTENSION = '.json';
 
 const SALES_ORG_FIELDS = [
+    'Name',
     'cgcloud__Sales_Org_Value__c',
     'cgcloud__Sales_Org__c',
     'cgcloud__Sales_Org__r.cgcloud__Sales_Org_Value__c',
@@ -100,7 +101,7 @@ class JsonConverter {
                             if (externalId) {
                                 const fileName = this.sanitizeFileName(externalId);
                                 const jsonPath = path.join(outputDir, `${fileName}${JSON_EXTENSION}`);
-                                await fs.writeJson(jsonPath, record, { spaces: 2 });
+                                await fs.writeFile(jsonPath, JSON.stringify(record, null, 4) + '\n');
                                 converted++;
                             } else {
                                 skipped++;

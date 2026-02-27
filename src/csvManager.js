@@ -2,7 +2,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const { parse } = require('csv-parse');
 
-const { CSV_EXTENSION, LINE_REPEAT } = require('./../config/constants');
+const { CSV_EXTENSION, LINE_REPEAT } = require('./config/constants');
 
 const DML_OPERATIONS = ['insert', 'delete', 'update', 'upsert'];
 const CSV_ISSUES_REPORT = 'CSVIssuesReport' + CSV_EXTENSION;
