@@ -79,7 +79,7 @@ class CsvManager {
                     const errorText = row['Errors']?.toString().trim();
                     const recordName = row['Name'] || row['Id'] || `Record ${totalRecords}`;
 
-                    if (errorText) {
+                    if (errorText && errorText !== '#N/A') {
                         errors.push({
                             recordName,
                             error: errorText.toString().trim(),
@@ -274,27 +274,25 @@ class CsvManager {
             console.log('\n📊 SUMMARY');
             console.log('='.repeat(LINE_REPEAT));
 
-            results.forEach((result) => {
-                console.log(`${result.objectType} (${result.operation}): ${result.errors.length}/${result.totalRecords} errors`);
-            });
+            const failedResults = results.filter((r) => r.errors.length > 0);
+            if (failedResults.length > 0) {
+                failedResults.forEach((result) => {
+                    console.log(`❌ ${result.objectType} (${result.operation}): ${result.errors.length}/${result.totalRecords} errors`);
+                });
+            }
 
             if (csvIssuesReport.totalIssues > 0) {
-                console.log(`CSV Issues: ${csvIssuesReport.totalIssues} issues`);
+                console.log(`❌ CSV Issues: ${csvIssuesReport.totalIssues} issues`);
             }
 
             if (missingParentReport.totalMissing > 0) {
-                console.log(`Missing Parent Records: ${missingParentReport.totalMissing} missing`);
-            }
-
-            console.log(`\nOverall: ${totalErrors} total errors/issues`);
-            if (totalRecords > 0) {
-                console.log(`Records processed: ${totalRecords}`);
+                console.log(`❌ Missing Parent Records: ${missingParentReport.totalMissing} missing`);
             }
 
             if (totalErrors === 0) {
-                console.log('🎉 All operations completed successfully with no errors!');
+                console.log(`🎉 All ${totalRecords} records processed successfully!`);
             } else {
-                console.log(`⚠️  ${totalErrors} errors/issues found`);
+                console.log(`\n⚠️  ${totalErrors} errors out of ${totalRecords} records processed`);
             }
         } catch (error) {
             console.error(`❌ Error analyzing CSV files: ${error.message}`);

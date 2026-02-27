@@ -196,6 +196,11 @@ class DataManager {
                 await this.applyBeforeReferences();
             }
 
+            // Pre-import: enrich junction queries with parent values from CSVs
+            if (this.config.isImport && this.config.junctionObjects.length > 0) {
+                await this.applyJunctionFilters(targetDir);
+            }
+
             const exportPath = path.join(targetDir, EXPORT_JSON);
 
             // Write temporary config file
@@ -429,6 +434,72 @@ class DataManager {
 
         await this.sfdmuManager.run(targetDir);
         console.log(`✅ After-reference export completed`);
+    }
+
+    /**
+     * Pre-import: enrich junction object queries with WHERE clauses from parent CSVs.
+     *
+     * Junction objects (e.g., KPI_Set_KPI_Definition) connect two parent objects.
+     * Without a WHERE clause, SFDMU queries ALL junction records in the target org,
+     * fails to match them with CSV records (different scope), and tries INSERT instead
+     * of UPDATE — which fails on duplicate keys.
+     *
+     * Reads each parent's CSV (already generated from JSON by jsonToCsv()) to collect
+     * parent external IDs, then builds WHERE: lookup IN (values) AND'd across parents.
+     */
+    async applyJunctionFilters(targetDir) {
+        const junctionObjects = this.config.junctionObjects;
+
+        console.log(`\n🔗 Applying junction filters for import...`);
+
+        for (const obj of junctionObjects) {
+            const filterClauses = [];
+
+            for (const junction of obj._junction) {
+                const parentObj = this.config.getObject(junction.objectName);
+                if (!parentObj) {
+                    console.warn(`  ⚠️  Parent object ${junction.objectName} not found in config`);
+                    continue;
+                }
+
+                // Read parent CSV from tmp directory
+                const csvPath = path.join(targetDir, junction.objectName + CSV_EXTENSION);
+                const records = await this.csvManager.readCsvRecords(csvPath);
+
+                if (records.length === 0) {
+                    console.warn(`  ⚠️  No CSV records for parent ${junction.objectName}`);
+                    continue;
+                }
+
+                const values = [...new Set(
+                    records.map((r) => r[parentObj.externalId]).filter(Boolean)
+                )];
+
+                if (values.length > 0) {
+                    const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
+                    filterClauses.push(`${junction.lookup} IN (${idsString})`);
+                    console.log(`  📊 ${obj.objectName}: ${values.length} ${junction.objectName} values for ${junction.lookup}`);
+                }
+            }
+
+            if (filterClauses.length === 0) {
+                console.log(`  ⏭️  ${obj.objectName}: no parent values found, skipping`);
+                continue;
+            }
+
+            // Modify the export.json object entry with filtered WHERE
+            const exportObj = this.config.exportJson.objects.find((o) => o.objectName === obj.objectName);
+            if (!exportObj) continue;
+
+            const selectFrom = exportObj.query.split(/\s+WHERE\s+|\s+ORDER\s+BY\s+/i)[0];
+            const orderByMatch = exportObj.query.match(/\bORDER\s+BY\s+(.+)$/i);
+            const orderBy = orderByMatch ? ` ORDER BY ${orderByMatch[1]}` : '';
+
+            exportObj.query = `${selectFrom} WHERE ${filterClauses.join(' AND ')}${orderBy}`;
+            exportObj.master = true;
+
+            console.log(`  🔗 ${obj.objectName}: filtered by ${filterClauses.length} parent conditions`);
+        }
     }
 
     /**
