@@ -229,21 +229,19 @@ class Config {
 
     /**
      * Build SFDMU addon manifests from _ metadata.
-     * Self-referencing _lookup entries become hierarchy-resolver addons on import.
+     * _hierarchy entries become hierarchy-resolver addons on import.
      */
     _buildAddons(objects) {
         const result = { objectAddons: {} };
 
         // Hierarchy resolver (import only, non-simulation)
-        // Self-referencing _lookup entries = object references itself via a lookup
+        // _hierarchy entries specify self-referencing lookup fields that need
+        // post-import resolution by querying the target org
         if (this.isImport && !this.simulation) {
             for (const obj of objects) {
-                if (!obj._lookup) continue;
+                if (!obj._hierarchy) continue;
 
-                const selfRefs = obj._lookup.filter((r) => r.objectName === obj.objectName && !r.filterBy);
-                if (selfRefs.length === 0) continue;
-
-                result.objectAddons[obj.objectName] = selfRefs.map((r) => ({
+                result.objectAddons[obj.objectName] = obj._hierarchy.map((r) => ({
                     path: path.join(ADDON_BASE, 'hierarchy-resolver.mjs'),
                     description: `Resolve self-lookup hierarchy for ${obj.objectName}`,
                     excluded: false,
@@ -260,10 +258,31 @@ class Config {
     }
 
     /**
-     * Get objects with _lookup metadata from raw config.
+     * Objects with _reference metadata (pre-export: enrich WHERE clauses).
+     */
+    get referenceObjects() {
+        return this._rawConfig.objects.filter((o) => o._reference);
+    }
+
+    /**
+     * Objects with _lookup metadata (post-export: resolve #N/A values).
      */
     get lookupObjects() {
         return this._rawConfig.objects.filter((o) => o._lookup);
+    }
+
+    /**
+     * Objects with _junction metadata (post-first-export: filter by parent CSVs).
+     */
+    get junctionObjects() {
+        return this._rawConfig.objects.filter((o) => o._junction);
+    }
+
+    /**
+     * Objects with _hierarchy metadata (import: hierarchy-resolver addon; export: #N/A resolution).
+     */
+    get hierarchyObjects() {
+        return this._rawConfig.objects.filter((o) => o._hierarchy);
     }
 
 }
