@@ -229,49 +229,30 @@ class Config {
 
     /**
      * Build SFDMU addon manifests from _ metadata.
+     * Self-referencing _lookup entries become hierarchy-resolver addons on import.
      */
     _buildAddons(objects) {
         const result = { objectAddons: {} };
 
-        // Union resolver (export only)
-        if (this.isExport) {
-            const unions = {};
-            for (const obj of objects) {
-                if (obj._union) {
-                    unions[obj.objectName] = {
-                        externalId: obj.externalId,
-                        parents: obj._union.map((u) => ({
-                            objectName: u.objectName,
-                            field: u.field,
-                        })),
-                    };
-                }
-            }
-
-            if (Object.keys(unions).length > 0) {
-                result.beforeAddons = [
-                    {
-                        path: path.join(ADDON_BASE, 'union-resolver.mjs'),
-                        description: 'Resolve union WHERE clauses',
-                        excluded: false,
-                        args: { unions },
-                    },
-                ];
-            }
-        }
-
         // Hierarchy resolver (import only, non-simulation)
+        // Self-referencing _lookup entries = object references itself via a lookup
         if (this.isImport && !this.simulation) {
             for (const obj of objects) {
-                if (obj._hierarchy) {
-                    const hierarchies = Array.isArray(obj._hierarchy) ? obj._hierarchy : [obj._hierarchy];
-                    result.objectAddons[obj.objectName] = hierarchies.map((h) => ({
-                        path: path.join(ADDON_BASE, 'hierarchy-resolver.mjs'),
-                        description: `Resolve self-lookup hierarchy for ${obj.objectName}`,
-                        excluded: false,
-                        args: h,
-                    }));
-                }
+                if (!obj._lookup) continue;
+
+                const selfRefs = obj._lookup.filter((r) => r.objectName === obj.objectName && !r.filterBy);
+                if (selfRefs.length === 0) continue;
+
+                result.objectAddons[obj.objectName] = selfRefs.map((r) => ({
+                    path: path.join(ADDON_BASE, 'hierarchy-resolver.mjs'),
+                    description: `Resolve self-lookup hierarchy for ${obj.objectName}`,
+                    excluded: false,
+                    args: {
+                        childField: obj.externalId,
+                        parentField: r.fieldName,
+                        parentIdField: r.fieldName.replace(/__r\..+$/, '__c'),
+                    },
+                }));
             }
         }
 
@@ -279,10 +260,10 @@ class Config {
     }
 
     /**
-     * Get objects with _junction metadata from raw config.
+     * Get objects with _lookup metadata from raw config.
      */
-    get junctionObjects() {
-        return this._rawConfig.objects.filter((o) => o._junction);
+    get lookupObjects() {
+        return this._rawConfig.objects.filter((o) => o._lookup);
     }
 }
 

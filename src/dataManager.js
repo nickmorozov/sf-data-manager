@@ -214,9 +214,9 @@ class DataManager {
             const totalTime = (Date.now() - startTime) / 1000;
             console.log(`✅ ${this.capitalizeFirst(this.config.operation)} completed successfully in ${totalTime}s!`);
 
-            // Post-export: junction secondary pass
-            if (this.config.isExport && this.config.junctionObjects.length > 0) {
-                await this.exportExtraJunctions(targetDir);
+            // Post-export: supplementary passes to fill in missing lookup records
+            if (this.config.isExport && this.config.lookupObjects.length > 0) {
+                await this.exportExtraLookups(targetDir);
             }
         } catch (error) {
             const totalTime = (Date.now() - startTime) / 1000;
@@ -226,156 +226,158 @@ class DataManager {
     }
 
     /**
-     * Export KPI Set definitions for a specific sales org
-     * @returns {Promise<void>}
+     * Post-export: resolve all _lookup entries by reading referenced CSVs,
+     * identifying missing or filtered records, and running supplementary SFDMU exports.
+     *
+     * Handles three lookup patterns via a single unified mechanism:
+     *   - No filterBy: read objectName's CSV, extract fieldName values,
+     *     find THIS object's missing records by externalId (union/hierarchy)
+     *   - With filterBy: read objectName's CSV, extract fieldName values,
+     *     find THIS object's records WHERE filterBy IN (values) (junction)
+     *   - Self-referencing (objectName === this object, no filterBy):
+     *     iterates to resolve multi-level hierarchies (up to MAX_DEPTH)
      */
-    async exportExtraJunctions(targetDir) {
-        console.log(`\n🎯 Exporting extra junction records...`);
+    async exportExtraLookups(targetDir) {
+        console.log(`\n🔗 Resolving lookups...`);
 
-        const objects = [];
-        const sharedObjectNames = new Set();
+        const MAX_DEPTH = 5;
+        let hasSelfRef = false;
 
-        for (const junctionConfig of this.config.junctionObjects) {
-            const meta = this.config.getObjectMeta(junctionConfig.objectName);
-            const junctionMeta = meta?._junction;
+        for (let iteration = 1; iteration <= MAX_DEPTH; iteration++) {
+            const objects = [];
+            const backupNames = new Set();
 
-            // Skip if _junction is just a boolean flag (no detailed parent config)
-            if (!junctionMeta || typeof junctionMeta !== 'object') {
-                continue;
-            }
+            for (const obj of this.config.lookupObjects) {
+                const allReferencedIds = new Set();
+                const filterClauses = [];
 
-            const junctions = Array.isArray(junctionMeta) ? junctionMeta : [junctionMeta];
+                for (const lookup of obj._lookup) {
+                    const isSelfRef = lookup.objectName === obj.objectName && !lookup.filterBy;
 
-            // Separate objects list (first entry) from parent entries
-            const objectsEntry = junctions.find((j) => j.objects);
-            const parentEntries = junctions.filter((j) => j.parent);
+                    // After first iteration, only process self-referencing lookups (hierarchy)
+                    if (iteration > 1 && !isSelfRef) continue;
+                    if (isSelfRef) hasSelfRef = true;
 
-            try {
-                // Build AND-joined WHERE: each parent contributes its own IN clause
-                const whereClauses = [];
-                for (const junction of parentEntries) {
-                    const ids = await this.csvManager.getParentExternalIdsFromSalesOrg(targetDir, junction.parent);
-                    if (ids.length === 0) {
-                        console.log(`  ⚠️ No records found for ${junction.parent.objectName}, skipping`);
-                        continue;
+                    // Read the lookup object's CSV and extract field values
+                    const csvPath = path.join(targetDir, lookup.objectName + CSV_EXTENSION);
+                    const records = await this.csvManager.readCsvRecords(csvPath);
+                    const values = [...new Set(records.map((r) => r[lookup.fieldName]).filter((v) => v && v !== '#N/A'))];
+
+                    if (values.length === 0) continue;
+
+                    if (lookup.filterBy) {
+                        // Junction: filter THIS object by the lookup field
+                        const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
+                        filterClauses.push(`${lookup.filterBy} IN (${idsString})`);
+                        console.log(`  📊 ${obj.objectName}: ${values.length} ${lookup.objectName} IDs for ${lookup.filterBy}`);
+                    } else {
+                        // Union/hierarchy: collect referenced IDs to check against already-exported
+                        for (const v of values) allReferencedIds.add(v);
                     }
-                    console.log(`  📊 Found ${ids.length} ${junction.parent.objectName} records: ${ids.join(', ')}`);
-                    const idsString = ids.map((id) => `'${id.replace(/'/g, "\\'")}'`).join(', ');
-                    whereClauses.push(`${junction.field} IN (${idsString})`);
                 }
 
-                if (whereClauses.length === 0) {
-                    console.log(`  ⚠️ No parent records found for ${junctionConfig.objectName}, skipping junction export`);
-                    continue;
+                // For union/hierarchy: find which referenced IDs are missing from this object's CSV
+                if (allReferencedIds.size > 0) {
+                    const existingCsvPath = path.join(targetDir, obj.objectName + CSV_EXTENSION);
+                    const existingRecords = await this.csvManager.readCsvRecords(existingCsvPath);
+                    const exportedIds = new Set(existingRecords.map((r) => r[obj.externalId]).filter(Boolean));
+                    const missingIds = [...allReferencedIds].filter((v) => !exportedIds.has(v));
+
+                    if (missingIds.length > 0) {
+                        const idsString = missingIds.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
+                        filterClauses.push(`${obj.externalId} IN (${idsString})`);
+                        console.log(`  📊 ${obj.objectName}: ${missingIds.length} missing records${iteration > 1 ? ` (depth ${iteration})` : ''}`);
+                    } else if (iteration === 1 && filterClauses.length === 0) {
+                        console.log(`  ✅ ${obj.objectName}: all ${allReferencedIds.size} referenced records already exported`);
+                    }
                 }
 
-                const where = whereClauses.join(' AND ');
+                if (filterClauses.length === 0) continue;
 
-                // Build junction query: replace any existing WHERE with the junction WHERE
-                const junctionObject = this.config.exportJson.objects.find((obj) => obj.objectName === junctionConfig.objectName);
-                const [selectFrom] = junctionObject.query.split(/ WHERE|ORDER BY /i);
-                const orderBy = junctionObject.query.split(/ ORDER BY /i).pop();
+                // Build export object with combined WHERE clause
+                const exportObj = this.config.exportJson.objects.find((o) => o.objectName === obj.objectName);
+                if (!exportObj) continue;
+
+                const where = filterClauses.length === 1 ? filterClauses[0] : `(${filterClauses.join(' OR ')})`;
+                const [selectFrom] = exportObj.query.split(/ WHERE | ORDER BY /i);
+                const orderByMatch = exportObj.query.match(/ ORDER BY (.+)$/i);
+                const orderBy = orderByMatch ? ` ORDER BY ${orderByMatch[1]}` : '';
+
                 objects.push({
-                    ...junctionObject,
-                    query: `${selectFrom} WHERE ${where} ORDER BY ${orderBy}`,
+                    ...exportObj,
+                    query: `${selectFrom} WHERE ${where}${orderBy}`,
                     master: true,
                 });
 
-                // Include parent objects so SFDMU can resolve relationship fields.
-                // If an explicit objects list is provided, use only those;
-                // otherwise include all non-junction objects for a full second run.
-                const parentNames = objectsEntry
-                    ? objectsEntry.objects
-                    : this.config.exportJson.objects.map((obj) => obj.objectName).filter((name) => name !== junctionConfig.objectName);
+                backupNames.add(obj.objectName);
+            }
 
-                for (const parentName of parentNames) {
-                    const parentObjectConfig = this.config.exportJson.objects.find((obj) => obj.objectName === parentName);
-                    if (!parentObjectConfig) {
-                        console.warn(`⚠️ Could not find configuration for ${parentName}, skipping`);
-                        continue;
-                    }
-                    if (!objects.some((obj) => obj.objectName === parentName)) {
-                        objects.push(parentObjectConfig);
-                    }
-                    sharedObjectNames.add(parentName);
+            if (objects.length === 0) {
+                if (iteration === 1) console.log(`  ✅ No missing lookup records`);
+                break;
+            }
+
+            // Back up existing CSVs before supplementary export overwrites them
+            const backups = {};
+            for (const objectName of backupNames) {
+                const csvPath = path.join(targetDir, objectName + CSV_EXTENSION);
+                backups[objectName] = await this.csvManager.readCsvRecords(csvPath);
+            }
+
+            try {
+                const lookupExportJson = { ...this.config.exportJson, objects };
+
+                if (this.config.verbose) {
+                    console.log(`  Export configuration:`, JSON.stringify(lookupExportJson, null, 2));
                 }
+
+                const exportPath = path.join(targetDir, EXPORT_JSON);
+                await fs.writeJson(exportPath, lookupExportJson, { spaces: 2 });
+                await this.sfdmuManager.run(targetDir);
+                await this.mergeExportCsvs(targetDir, backups);
             } catch (error) {
-                console.error(`❌ Failed to export ${junctionConfig.objectName}: ${error.message}`);
+                console.error(`  ❌ Failed to export lookup records: ${error.message}`);
                 throw error;
             }
+
+            // Only iterate if there are self-referencing lookups (hierarchy)
+            if (!hasSelfRef) break;
         }
 
-        if (objects.length === 0) {
-            console.log(`  ⚠️ No junction objects to export, skipping`);
-            return;
-        }
-
-        // Back up CSV records for shared objects before junction export overwrites them
-        const backups = {};
-        for (const objectName of sharedObjectNames) {
-            const csvPath = path.join(targetDir, objectName + CSV_EXTENSION);
-            backups[objectName] = await this.csvManager.readCsvRecords(csvPath);
-            if (this.config.verbose && backups[objectName].length > 0) {
-                console.log(`  📦 Backed up ${backups[objectName].length} ${objectName} records`);
-            }
-        }
-
-        // Create the export configuration for junction records
-        try {
-            const junctionExportJson = { ...this.config.exportJson, objects };
-
-            if (this.config.verbose) {
-                console.log(`  Export configuration for junction records :`, JSON.stringify(junctionExportJson, null, 2));
-            }
-
-            // Write the export configuration
-            const exportPath = path.join(targetDir, EXPORT_JSON);
-            await fs.writeJson(exportPath, junctionExportJson, { spaces: 2 });
-
-            // Run SFDMU export for KPI Set definitions
-            await this.sfdmuManager.run(targetDir);
-
-            // Merge backed-up records with junction export results
-            await this.mergeExportCsvs(targetDir, backups);
-
-            console.log(`✅ Junction export completed successfully!`);
-        } catch (error) {
-            console.error(`  ❌ Failed to export junction records: ${error.message}`);
-            throw error;
-        }
+        console.log(`✅ Lookup export completed`);
     }
 
     /**
-     * Merge backed-up CSV records from the main export with junction export results.
-     * Main records take priority for duplicate external IDs (they have complete lookup context).
+     * Merge backed-up CSV records with supplementary export results.
+     * Backed-up records take priority for duplicate external IDs (they have complete lookup context).
      */
     async mergeExportCsvs(targetDir, backups) {
-        for (const [objectName, mainRecords] of Object.entries(backups)) {
-            if (mainRecords.length === 0) continue;
+        for (const [objectName, backedUpRecords] of Object.entries(backups)) {
+            if (backedUpRecords.length === 0) continue;
 
             const objectConfig = this.config.getObject(objectName);
             if (!objectConfig) continue;
 
             const csvPath = path.join(targetDir, objectName + CSV_EXTENSION);
-            const junctionRecords = await this.csvManager.readCsvRecords(csvPath);
+            const newRecords = await this.csvManager.readCsvRecords(csvPath);
 
-            // Merge by external ID (main records take priority — they have complete lookup context)
             const externalId = objectConfig.externalId;
             const merged = new Map();
 
-            for (const record of junctionRecords) {
+            // New records first, then backed-up records overwrite duplicates
+            for (const record of newRecords) {
                 const key = record[externalId];
                 if (key) merged.set(key, record);
             }
-            for (const record of mainRecords) {
+            for (const record of backedUpRecords) {
                 const key = record[externalId];
                 if (key) merged.set(key, record);
             }
 
             const mergedRecords = Array.from(merged.values());
 
-            if (mergedRecords.length !== junctionRecords.length) {
-                console.log(`  🔀 Merged ${objectName}: ${mainRecords.length} (main) + ${junctionRecords.length} (junction) → ${mergedRecords.length} unique records`);
+            if (mergedRecords.length !== newRecords.length) {
+                console.log(`  🔀 Merged ${objectName}: ${backedUpRecords.length} (existing) + ${newRecords.length} (new) → ${mergedRecords.length} unique records`);
             }
 
             await this.jsonConverter.writeRecordsToCsv(mergedRecords, csvPath);

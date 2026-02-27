@@ -13,67 +13,6 @@ class CsvManager {
         this.config = config;
     }
 
-    async getChildParentMapping(targetDir, objectConfig) {
-        const csvPath = path.join(targetDir, objectConfig.objectName + CSV_EXTENSION);
-        if (!(await fs.pathExists(csvPath))) {
-            throw new Error(csvPath + ' not found');
-        }
-
-        return new Promise((resolve, reject) => {
-            const childParentMap = new Map(); // child name -> parent name
-            const allExternalIds = new Set(); // all externalIds from CSV
-
-            fs.createReadStream(csvPath)
-                .pipe(parse({ columns: true, bom: true }))
-                .on('data', (row) => {
-                    const childName = row[objectConfig.hierarchy.childField]?.trim();
-                    const parentName = row[objectConfig.hierarchy.parentField]?.trim();
-
-                    if (childName && parentName) {
-                        childParentMap.set(childName, parentName);
-                        allExternalIds.add(childName);
-                        allExternalIds.add(parentName);
-                    }
-                })
-                .on('end', () =>
-                    resolve({
-                        childParentMap: Object.fromEntries(childParentMap),
-                        allExternalIds: Array.from(allExternalIds),
-                    })
-                )
-                .on('error', reject);
-        });
-    }
-
-    /**
-     * Extract KPI Set names from KPI_Map CSV files for a specific sales org
-     */
-    async getParentExternalIdsFromSalesOrg(targetDir, parentConfig) {
-        const objectCsv = path.join(targetDir, parentConfig.objectName + CSV_EXTENSION);
-
-        if (!(await fs.pathExists(objectCsv))) {
-            console.log(`⚠️ ${objectCsv} not found, skipping KPI Set export`);
-            return [];
-        }
-
-        return new Promise((resolve, reject) => {
-            const externalIds = new Set();
-
-            fs.createReadStream(objectCsv)
-                .pipe(parse({ columns: true, bom: true }))
-                .on('data', (row) => {
-                    const externalId = row[parentConfig.field || parentConfig.externalId];
-                    if (externalId) {
-                        externalIds.add(externalId);
-                    }
-                })
-                .on('end', () => {
-                    resolve(Array.from(externalIds));
-                })
-                .on('error', reject);
-        });
-    }
-
     /**
      * Read all records from a CSV file
      */

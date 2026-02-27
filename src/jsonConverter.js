@@ -192,8 +192,8 @@ class JsonConverter {
                 const jsonPath = path.join(jsonDir, file);
                 const record = await fs.readJson(jsonPath);
 
-                // Force pushable to false on first import
-                if (file.includes(objectName) && !this.config.madeTemporaryImport) {
+                // Force temporary values on first import (e.g. pushable=false)
+                if (!this.config.madeTemporaryImport) {
                     const meta = this.config.getObjectMeta(objectName);
 
                     for (const [fieldName, temporaryValue] of Object.entries(meta?._temporaryValues || {})) {
