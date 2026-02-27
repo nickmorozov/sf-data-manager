@@ -128,11 +128,19 @@ class DataManager {
 
     async getAllSalesOrgs() {
         try {
-            const queryOrg = this.config.isImport ? this.config.target : this.config.source;
-            const allSalesOrgs = await this.sfManager.querySalesOrgs(queryOrg, this.config._salesOrgConfig);
+            let allSalesOrgs;
+
+            if (this.config.isImport) {
+                // For imports, read sales orgs from the data directory subdirectories
+                // instead of querying the target org (which may be empty)
+                allSalesOrgs = await this._getSalesOrgsFromDataDir();
+            } else {
+                const queryOrg = this.config.source;
+                allSalesOrgs = await this.sfManager.querySalesOrgs(queryOrg, this.config._salesOrgConfig);
+            }
 
             if (allSalesOrgs.length === 0) {
-                console.warn('⚠️ No sales organizations found in source org');
+                console.warn('⚠️ No sales organizations found');
                 return;
             }
 
@@ -140,12 +148,27 @@ class DataManager {
 
             this.config.salesOrgs = allSalesOrgs.map((org) => ({
                 source: org,
-                target: org, // Use the same org for target if not specified
+                target: org,
             }));
         } catch (error) {
             console.error(`Error getting sales orgs: ${error.message}`);
             throw error;
         }
+    }
+
+    /**
+     * Read sales org codes from the data directory subdirectories.
+     * Each subdirectory name (e.g., "0001", "0002") is a sales org code.
+     */
+    async _getSalesOrgsFromDataDir() {
+        const entries = await fs.readdir(this.config.dataDir, { withFileTypes: true });
+        const salesOrgs = entries
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => entry.name)
+            .sort();
+
+        console.log(`📂 Reading sales orgs from data directory: ${this.config.dataDir}`);
+        return salesOrgs;
     }
 
     async transferSalesOrgData() {
