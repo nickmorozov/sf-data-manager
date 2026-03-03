@@ -60,7 +60,8 @@ class JsonConverter {
                 const objectConfig = this.config.getObject(objectName);
 
                 if (!objectConfig) {
-                    throw new Error(`Invalid object name: ${objectName}`);
+                    console.error(`Invalid object name: ${objectName}`);
+                    continue;
                 }
 
                 await this.convertCsvFileToJson(csvPath, objectConfig, baseOutputDir);
