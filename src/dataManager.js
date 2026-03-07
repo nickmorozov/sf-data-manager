@@ -233,10 +233,13 @@ class DataManager {
 
             await this.sfdmuManager.run(targetDir);
 
-            // Post-import: resolve hierarchies and restore temporary values
+            // Post-import: resolve hierarchies, cross-object lookups, and restore temporary values
             if (this.config.isImport && !this.config.simulation) {
                 if (this.config.hierarchyObjects.length > 0) {
                     await this.resolveHierarchies();
+                }
+                if (this.config.resolveLookupObjects.length > 0) {
+                    await this.resolvePostLookups();
                 }
                 if (this.config.needTemporaryImport) {
                     await this.restoreTemporaryValues();
@@ -690,6 +693,127 @@ class DataManager {
                 }
             } catch (error) {
                 console.warn(`  ⚠️  Failed to resolve hierarchies for ${obj.objectName}: ${error.message}`);
+            }
+        }
+    }
+
+    /**
+     * Post-import: resolve cross-object lookup fields.
+     *
+     * Unlike _hierarchy (same-object self-reference), _resolveLookup matches
+     * a field value from the CSV against a different object in the target org.
+     *
+     * Example: Resource_Assignment__c has Resource_Name__c = "John Smith".
+     * This queries the target org for User WHERE Name = 'John Smith',
+     * then updates Resource_User__c with the matched User ID.
+     */
+    async resolvePostLookups() {
+        console.log(`\n🔗 Resolving cross-object lookups...`);
+
+        for (const obj of this.config.resolveLookupObjects) {
+            const externalId = obj.externalId;
+
+            // Read CSV
+            const csvPath = path.join(this.config.tmpDir, this.config.targetOrg || '', obj.objectName + CSV_EXTENSION);
+            const records = await this.csvManager.readCsvRecords(csvPath);
+
+            if (records.length === 0) continue;
+
+            for (const lookup of obj._resolveLookup) {
+                const { matchField, lookupObject, lookupMatchField, updateField } = lookup;
+
+                // Collect unique match values from CSV
+                const matchValues = [...new Set(
+                    records.map((r) => r[matchField]).filter((v) => v && v !== '#N/A')
+                )];
+
+                if (matchValues.length === 0) {
+                    console.log(`  ✅ ${obj.objectName}.${updateField}: no values to resolve`);
+                    continue;
+                }
+
+                // Query target org for matching records
+                const escape = (v) => v.replace(/'/g, "\\'");
+                const valuesString = matchValues.map((v) => `'${escape(v)}'`).join(', ');
+                const lookupSoql = `SELECT Id, ${lookupMatchField} FROM ${lookupObject} WHERE ${lookupMatchField} IN (${valuesString})`;
+
+                try {
+                    const lookupRecords = await this.sfManager.query(this.config.target, lookupSoql);
+
+                    // Build name → Id map
+                    const nameToId = new Map();
+                    for (const r of lookupRecords) {
+                        nameToId.set(r[lookupMatchField], r.Id);
+                    }
+
+                    if (nameToId.size === 0) {
+                        console.log(`  ⚠️  ${obj.objectName}.${updateField}: no matching ${lookupObject} records found`);
+                        continue;
+                    }
+
+                    // Build CSV matchValue → lookup Id mapping, then query this object's records
+                    const getKey = this._buildKeyFn(externalId);
+                    const extIdToLookupId = new Map();
+                    for (const record of records) {
+                        const key = getKey(record);
+                        const matchValue = record[matchField];
+                        const lookupId = matchValue ? nameToId.get(matchValue) : null;
+                        if (key && lookupId) {
+                            extIdToLookupId.set(key, lookupId);
+                        }
+                    }
+
+                    if (extIdToLookupId.size === 0) {
+                        console.log(`  ✅ ${obj.objectName}.${updateField}: no updates needed`);
+                        continue;
+                    }
+
+                    // Query target org for this object's records
+                    const allExtIds = [...extIdToLookupId.keys()];
+                    const externalIdParts = externalId.split(';');
+                    const isCompound = externalIdParts.length > 1;
+
+                    let soql;
+                    if (isCompound) {
+                        const fieldValueSets = externalIdParts.map(() => new Set());
+                        for (const key of allExtIds) {
+                            const parts = key.split(';');
+                            parts.forEach((part, idx) => fieldValueSets[idx].add(part));
+                        }
+                        const whereClauses = externalIdParts.map((field, idx) => {
+                            const vals = [...fieldValueSets[idx]].map((v) => `'${escape(v)}'`).join(', ');
+                            return `${field} IN (${vals})`;
+                        });
+                        soql = `SELECT Id, ${externalIdParts.join(', ')} FROM ${obj.objectName} WHERE ${whereClauses.join(' AND ')}`;
+                    } else {
+                        const idsString = allExtIds.map((v) => `'${escape(v)}'`).join(', ');
+                        soql = `SELECT Id, ${externalId} FROM ${obj.objectName} WHERE ${externalId} IN (${idsString})`;
+                    }
+
+                    const orgRecords = await this.sfManager.query(this.config.target, soql);
+
+                    // Build updates
+                    const updates = [];
+                    for (const orgRecord of orgRecords) {
+                        const key = isCompound
+                            ? externalIdParts.map((part) => this._extractNestedField(orgRecord, part)).join(';')
+                            : orgRecord[externalId] || this._extractNestedField(orgRecord, externalId);
+
+                        const lookupId = key ? extIdToLookupId.get(key) : null;
+                        if (lookupId) {
+                            updates.push({ Id: orgRecord.Id, [updateField]: lookupId });
+                        }
+                    }
+
+                    if (updates.length > 0) {
+                        await this.sfManager.update(this.config.target, obj.objectName, updates);
+                        console.log(`  ✅ ${obj.objectName}.${updateField}: resolved ${updates.length} records (matched ${nameToId.size} ${lookupObject} records)`);
+                    } else {
+                        console.log(`  ✅ ${obj.objectName}.${updateField}: no updates needed`);
+                    }
+                } catch (error) {
+                    console.warn(`  ⚠️  Failed to resolve ${obj.objectName}.${updateField}: ${error.message}`);
+                }
             }
         }
     }

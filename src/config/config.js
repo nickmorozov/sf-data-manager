@@ -246,6 +246,13 @@ class Config {
         return this._rawConfig.objects.filter((o) => o._hierarchy);
     }
 
+    /**
+     * Objects with _resolveLookup metadata (post-import: cross-object lookup resolution).
+     */
+    get resolveLookupObjects() {
+        return this._rawConfig.objects.filter((o) => o._resolveLookup);
+    }
+
 }
 
 module.exports = {
