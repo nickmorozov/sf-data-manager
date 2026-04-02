@@ -405,9 +405,7 @@ class DataManager {
 
                 try {
                     const orgRecords = await this.sfManager.query(this.config.source, soql);
-                    const values = orgRecords
-                        .map((r) => this._extractNestedField(r, lookup.fieldName))
-                        .filter((v) => v && v !== '#N/A');
+                    const values = orgRecords.map((r) => this._extractNestedField(r, lookup.fieldName)).filter((v) => v && v !== '#N/A');
 
                     for (const v of values) allValues.add(v);
                     console.log(`  ✅ ${lookup.objectName}: ${new Set(values).size} unique values from ${orgRecords.length} records`);
@@ -497,9 +495,7 @@ class DataManager {
                     continue;
                 }
 
-                const values = [...new Set(
-                    records.map((r) => r[parentObj.externalId]).filter(Boolean)
-                )];
+                const values = [...new Set(records.map((r) => r[parentObj.externalId]).filter(Boolean))];
 
                 if (values.length > 0) {
                     const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
@@ -723,9 +719,7 @@ class DataManager {
                 const { matchField, lookupObject, lookupMatchField, updateField } = lookup;
 
                 // Collect unique match values from CSV
-                const matchValues = [...new Set(
-                    records.map((r) => r[matchField]).filter((v) => v && v !== '#N/A')
-                )];
+                const matchValues = [...new Set(records.map((r) => r[matchField]).filter((v) => v && v !== '#N/A'))];
 
                 if (matchValues.length === 0) {
                     console.log(`  ✅ ${obj.objectName}.${updateField}: no values to resolve`);
@@ -856,9 +850,7 @@ class DataManager {
                 }
 
                 // Collect unique parent values using the parent's externalId
-                const values = [...new Set(
-                    records.map((r) => r[parentObj.externalId]).filter(Boolean)
-                )];
+                const values = [...new Set(records.map((r) => r[parentObj.externalId]).filter(Boolean))];
 
                 if (values.length > 0) {
                     const idsString = values.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(', ');
@@ -937,10 +929,7 @@ class DataManager {
         console.log(`\n🔗 Resolving lookup values...`);
 
         for (const obj of objectsToResolve) {
-            const fieldNames = [
-                ...(obj._lookup || []).map((l) => l.fieldName),
-                ...(obj._hierarchy || []).map((l) => l.fieldName),
-            ];
+            const fieldNames = [...(obj._lookup || []).map((l) => l.fieldName), ...(obj._hierarchy || []).map((l) => l.fieldName)];
 
             // Read this object's CSV
             const csvPath = path.join(targetDir, obj.objectName + CSV_EXTENSION);

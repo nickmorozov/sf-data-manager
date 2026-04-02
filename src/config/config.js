@@ -195,9 +195,7 @@ class Config {
             return query;
         }
 
-        const salesOrgsString = this.salesOrgs
-            ?.map((salesOrgs) => `'${this.isExport ? salesOrgs.source : salesOrgs.target}'`)
-            .join(', ');
+        const salesOrgsString = this.salesOrgs?.map((salesOrgs) => `'${this.isExport ? salesOrgs.source : salesOrgs.target}'`).join(', ');
 
         // For sales org object with no sales orgs specified, remove WHERE clause
         if (isSalesOrgObject && !salesOrgsString) {
@@ -216,7 +214,6 @@ class Config {
         // No sales orgs and not a sales org object — remove WHERE clause
         return query.replace(/ WHERE .+?(?= ORDER BY )/i, '');
     }
-
 
     /**
      * Objects with _reference metadata (pre-export: enrich WHERE clauses).
@@ -252,7 +249,6 @@ class Config {
     get resolveLookupObjects() {
         return this._rawConfig.objects.filter((o) => o._resolveLookup);
     }
-
 }
 
 module.exports = {

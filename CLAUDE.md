@@ -69,6 +69,7 @@ Commander.js CLI. Parses args, creates `Config`, creates `DataManager`, runs `in
 **Temporary values.** Objects with `_temporaryValues` have fields overridden during CSV generation (e.g., `Is_Pushable__c = false` to prevent CG Cloud triggers). After the single SFDMU run completes, `restoreTemporaryValues()` queries the target org and updates each record to its real value via the API.
 
 **Export pipeline.** Pre-processing enriches queries, then one or two SFDMU runs, then post-processing:
+
 1. `_reference` — Query org for objects referencing this one, enrich WHERE with their values (OR'd with original)
 2. SFDMU run 1 (all objects)
 3. `_junction` — Read parent CSVs from run 1, build junction WHERE (AND'd across parents), run SFDMU again with only junctions (replaces unfiltered CSVs)
@@ -76,10 +77,10 @@ Commander.js CLI. Parses args, creates `Config`, creates `DataManager`, runs `in
 5. CSV → JSON conversion
 
 **Import pipeline.** Single SFDMU run with hierarchy resolution:
+
 1. JSON → CSV conversion
 2. SFDMU run (upserts all records, self-referencing lookups left NULL)
 3. `resolveHierarchies()` — reads CSV for child→parent mapping, queries target org for IDs, updates self-referencing lookups via API
-
 
 ### JSON Config Schema
 
@@ -89,12 +90,12 @@ Consumer projects provide `config/<operation>.json` (e.g., `config/export.json`)
 - `_salesOrg` — Optional `{ objectName, externalId }` enabling sales org partitioning
 - `excludeIdsFromCSVFiles`, `promptOnIssuesInCSVFiles`, `promptOnMissingParentObjects` — SFDMU flags
 - `objects[]` — Salesforce object definitions with standard SFDMU properties plus `_`-prefixed metadata:
-  - `_reference` — `[{ objectName, fieldName }]`: pre-export WHERE enrichment from referencing objects
-  - `_junction` — `[{ objectName, lookup }]`: post-first-run WHERE enrichment from parent CSVs
-  - `_lookup` — `[{ objectName, fieldName }]`: post-export `#N/A` resolution by querying source org
-  - `_hierarchy` — `[{ fieldName }]`: post-export `#N/A` resolution + post-import self-referencing lookup resolution
-  - `_slim` — Include in slim imports
-  - `_salesOrgObject` — Marks the sales org object itself
+    - `_reference` — `[{ objectName, fieldName }]`: pre-export WHERE enrichment from referencing objects
+    - `_junction` — `[{ objectName, lookup }]`: post-first-run WHERE enrichment from parent CSVs
+    - `_lookup` — `[{ objectName, fieldName }]`: post-export `#N/A` resolution by querying source org
+    - `_hierarchy` — `[{ fieldName }]`: post-export `#N/A` resolution + post-import self-referencing lookup resolution
+    - `_slim` — Include in slim imports
+    - `_salesOrgObject` — Marks the sales org object itself
 
 ## Conventions
 
