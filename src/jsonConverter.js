@@ -15,10 +15,14 @@ const SALES_ORG_FIELDS = [
 ];
 
 // Objects managed by SFDMU addons (e.g. core:ExportFiles) — not declared in config but
-// emitted as CSVs in tmp/. Converted wholesale to a single JSON array per object so they
-// can be version-controlled alongside per-record data.
-const ADDON_MANAGED_OBJECTS = new Set(['Attachment', 'ContentDocumentLink', 'ContentVersion', 'Note']);
-const ADDON_BUNDLE_FILENAME = '_addon-records.json';
+// emitted as CSVs in tmp/. Each gets a synthesized external Id so records become
+// version-controlled per-file like normal data.
+const ADDON_MANAGED_OBJECTS = {
+    Attachment: 'Name',
+    ContentDocumentLink: 'ContentDocumentId;LinkedEntityId',
+    ContentVersion: 'Title',
+    Note: 'Title',
+};
 
 class JsonConverter {
     constructor(config) {
@@ -67,8 +71,9 @@ class JsonConverter {
                 const objectConfig = this.config.getObject(objectName);
 
                 if (!objectConfig) {
-                    if (exportFilesAddonPresent && ADDON_MANAGED_OBJECTS.has(objectName)) {
-                        await this.convertAddonCsvToJson(csvPath, objectName, baseOutputDir);
+                    if (exportFilesAddonPresent && ADDON_MANAGED_OBJECTS[objectName]) {
+                        const syntheticConfig = { objectName, externalId: ADDON_MANAGED_OBJECTS[objectName] };
+                        await this.convertCsvFileToJson(csvPath, syntheticConfig, baseOutputDir);
                         continue;
                     }
                     console.error(`Invalid object name: ${objectName}`);
@@ -85,34 +90,6 @@ class JsonConverter {
         return rawObjects.some((obj) => (obj.afterAddons || []).some((a) => a && a.module === 'core:ExportFiles'));
     }
 
-    async convertAddonCsvToJson(csvPath, objectName, baseOutputDir) {
-        const outputDir = path.join(baseOutputDir, objectName);
-        await fs.ensureDir(outputDir);
-
-        return new Promise((resolve, reject) => {
-            const records = [];
-            fs.createReadStream(csvPath)
-                .pipe(parse({ columns: true, bom: true }))
-                .on('data', (row) => records.push(row))
-                .on('end', async () => {
-                    try {
-                        const jsonPath = path.join(outputDir, ADDON_BUNDLE_FILENAME);
-                        await fs.writeFile(jsonPath, JSON.stringify(records, null, 4) + '\n');
-                        if (this.config.verbose) {
-                            console.log(`    ✅ Converted ${records.length} addon-managed records for ${objectName}`);
-                        }
-                        if (records.length === 0) {
-                            await fs.remove(outputDir);
-                            await fs.remove(csvPath);
-                        }
-                        resolve();
-                    } catch (error) {
-                        reject(error);
-                    }
-                })
-                .on('error', reject);
-        });
-    }
 
     async convertCsvFileToJson(csvPath, objectConfig, baseOutputDir) {
         if (!objectConfig) {
@@ -228,21 +205,6 @@ class JsonConverter {
     async convertJsonDirectoryToCsv(jsonDir, csvPath, objectName, salesOrg) {
         if (this.config.verbose) {
             console.log(`  📄 Converting ${objectName}...`);
-        }
-
-        // Addon-managed objects store all records in a single bundle file
-        if (ADDON_MANAGED_OBJECTS.has(objectName)) {
-            const bundlePath = path.join(jsonDir, ADDON_BUNDLE_FILENAME);
-            if (await fs.pathExists(bundlePath)) {
-                const records = await fs.readJson(bundlePath);
-                if (Array.isArray(records) && records.length > 0) {
-                    await this.writeRecordsToCsv(records, csvPath);
-                    if (this.config.verbose) {
-                        console.log(`    ✅ Converted ${records.length} addon-managed records for ${objectName}`);
-                    }
-                }
-                return;
-            }
         }
 
         const jsonFiles = await fs.readdir(jsonDir);
